@@ -61,7 +61,8 @@ func Main(m *testing.M) {
 }
 
 // New returns a pool on a fresh schema of the test PostgreSQL with postgresadapter.MigrationV1
-// applied; the pool is closed and the schema dropped when the test ends.
+// applied; the pool is closed and the schema dropped when the test ends. The pool's connection
+// string, pool.Config().ConnString(), reaches the same schema, for processes the test starts.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	instance.once.Do(instance.start)
@@ -72,11 +73,10 @@ func New(t *testing.T) *pgxpool.Pool {
 	schema := randomSchema(t)
 	createSchema(t, schema)
 
-	config, err := pgxpool.ParseConfig(instance.url)
+	config, err := pgxpool.ParseConfig(instance.url + "&search_path=" + schema)
 	if err != nil {
 		t.Fatalf("parse the test database URL: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("open the test pool: %v", err)

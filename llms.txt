@@ -1,12 +1,23 @@
 # govengers/jobs
 
-> Durable PostgreSQL work queue for govengers services: enqueue inside the caller's transaction, typed kinds, lease and heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain.
+> Durable PostgreSQL work queue for govengers services: typed kinds, enqueue inside the caller's transaction, lease plus heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain and release, adapters for wide events, auth identity and Prometheus.
 
 - Module: `github.com/govengers/jobs` (v1 in development), Go 1.26, PostgreSQL 18, Apache 2.0.
-- Packages: `jobs` (model, outcomes, worker, Store interface), `postgresadapter` (Store on pgx/v5, enqueue, admin operations, DDL).
+- Packages: `jobs` (model, outcomes, worker, Store/Observer/Propagator interfaces), `postgresadapter` (Store on pgx/v5, Enqueue, admin operations, QueueDepths, MigrationV1), `wideeventadapter`, `authadapter`, `prometheusadapter`, `jobstest` (Drain).
 - Standards: govengers/standards, `library` profile.
+- Rule of thumb: jobs stay inside one service and its database; delivery is at least once, so handlers are idempotent; a handler is a job controller that calls a service method.
 
 ## Docs
 
-- [docs/design.md](docs/design.md): the binding design, decisions J1-J18 (jobs) and E1-E11 (events, separate module), schema, work packages.
-- [README.md](README.md): install and a minimal example.
+- [README.md](README.md): overview, install, usage, outcomes, packages, guarantees.
+- [docs/wiki/Home.md](docs/wiki/Home.md): model, package map, which piece for which need, wiring order.
+- [docs/wiki/Kinds-and-Enqueue.md](docs/wiki/Kinds-and-Enqueue.md): kinds, payloads, enqueue in a transaction, unique keys, run times.
+- [docs/wiki/Worker.md](docs/wiki/Worker.md): queues, outcomes, leases, heartbeat, fencing, shutdown, rescuer, retention, split deployments.
+- [docs/wiki/Schedules.md](docs/wiki/Schedules.md): recurring jobs once per period.
+- [docs/wiki/Postgres-Store.md](docs/wiki/Postgres-Store.md): schema, migration, admin operations.
+- [docs/wiki/Observability.md](docs/wiki/Observability.md): wide events, metrics (aggregate depth with max), identity, Observer.
+- [docs/wiki/Testing.md](docs/wiki/Testing.md): jobstest.Drain, embedded Postgres, the end-to-end suite.
+- [docs/wiki/Migration.md](docs/wiki/Migration.md): replacing a hand-rolled Postgres queue.
+- [docs/wiki/Gotchas.md](docs/wiki/Gotchas.md): the rules that are easy to get wrong.
+- [docs/design.md](docs/design.md): the binding design, decisions J1 onwards (jobs) and E1-E11 (events, a separate module).
+- [examples/signup](examples/signup): a tested example service.

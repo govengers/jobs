@@ -1,18 +1,30 @@
 name: CI
 
+# govengers/jobs, from the library template of govengers/standards (templates/library).
+#
+# Every push and pull request: lint, unit tests of changed and affected packages (TST-014), the end-to-end suite
+# unless it is unchanged (TST-015), vulncheck, and README badges from main. Nightly: every test, uncached, so a
+# flaky test cannot hide in the cache for longer than a day.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 2 * * *"
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run; pushes to main and tags always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  go-library:
+  library:
     uses: govengers/.github/.github/workflows/go-library.yml@v1
     with:
-      e2e: false # no end-to-end suite before WP5
+      full: ${{ github.event_name == 'schedule' }}
     permissions:
       contents: write # the badges job pushes test and coverage badges to the badges branch
