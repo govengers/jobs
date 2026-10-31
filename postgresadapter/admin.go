@@ -127,12 +127,21 @@ func (s *Store) Cancel(ctx context.Context, id uuid.UUID) error {
 	return s.explainMiss(ctx, id, ErrFinished, "cancel")
 }
 
+// retryJob starts a dead job over: its attempts, its last error and a cancellation requested
+// before it died are reset, so the first heartbeat of the new run does not cancel it.
 const retryJob = `
-UPDATE govengers_jobs SET status = 'pending', attempt = 0, run_at = now(), finished_at = NULL, updated_at = now()
+UPDATE govengers_jobs SET
+    status = 'pending',
+    attempt = 0,
+    run_at = now(),
+    finished_at = NULL,
+    cancel_requested = false,
+    last_error = NULL,
+    updated_at = now()
 WHERE id = $1 AND status = 'dead'`
 
-// Retry returns the dead job with id to pending with its attempts reset. It returns
-// ErrNotFound or ErrNotDead.
+// Retry returns the dead job with id to pending with its attempts, its last error and any
+// earlier cancellation request reset. It returns ErrNotFound or ErrNotDead.
 func (s *Store) Retry(ctx context.Context, id uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx, retryJob, id)
 	if err != nil {

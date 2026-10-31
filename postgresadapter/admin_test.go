@@ -111,3 +111,25 @@ func TestQueueDepths(t *testing.T) {
 	require.Equal(t, 1, reports.Pending)
 	require.InDelta(t, 90, reports.OldestPendingAge.Seconds(), 30)
 }
+
+// Finding 2: a retried job starts over; a cancel requested before it died does not cancel the
+// new run.
+func TestRetryClearsAnEarlierCancelRequest(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+	require.NoError(t, store.Cancel(ctx, id))
+	_, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusDead, Error: "mailbox does not exist"})
+	require.NoError(t, err)
+
+	require.NoError(t, store.Retry(ctx, id))
+
+	record := get(t, store, id)
+	require.False(t, record.CancelRequested)
+	require.Empty(t, record.LastError)
+	retried := claimOne(t, store, lease)
+	held, err := store.ExtendLeases(ctx, []jobs.Lease{retried.Lease}, lease)
+	require.NoError(t, err)
+	require.Equal(t, []jobs.HeldLease{{Lease: retried.Lease}}, held, "the first heartbeat of the new run carries no cancel request")
+}
