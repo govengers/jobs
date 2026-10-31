@@ -3,21 +3,21 @@ package jobs
 import (
 	"context"
 	"time"
+
+	"github.com/govengers/jobs/internal/recovery"
 )
 
-// maintain rescues expired leases, sweeps old jobs and enqueues due schedules until ctx is
-// cancelled. Every worker does it; the store's row locks keep the workers from doing the same
-// work twice, so no leader is needed. Each task runs once at start, then on its interval.
+// maintain rescues expired leases and sweeps old jobs until ctx is cancelled. Every worker
+// does it; the store's row locks keep the workers from doing the same work twice, so no leader
+// is needed. Each task runs once at start, then on its interval. Schedules have a loop of their
+// own (enqueueSchedules), so a schedule that waits never delays a rescue.
 func (w *Worker) maintain(ctx context.Context) error {
 	rescue := time.NewTicker(w.timing.rescueInterval)
 	defer rescue.Stop()
 	sweep := time.NewTicker(w.timing.sweepInterval)
 	defer sweep.Stop()
-	schedules := time.NewTicker(w.timing.scheduleInterval)
-	defer schedules.Stop()
 	w.rescue(ctx)
 	w.sweep(ctx)
-	w.enqueueDueSchedules(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -26,8 +26,26 @@ func (w *Worker) maintain(ctx context.Context) error {
 			w.rescue(ctx)
 		case <-sweep.C:
 			w.sweep(ctx)
-		case <-schedules.C:
-			w.enqueueDueSchedules(ctx)
+		}
+	}
+}
+
+// enqueueSchedules checks the schedules once at start, then every ScheduleInterval, until ctx
+// is cancelled.
+func (w *Worker) enqueueSchedules(ctx context.Context) error {
+	ticker := time.NewTicker(w.timing.scheduleInterval)
+	defer ticker.Stop()
+	for {
+		for _, schedule := range w.schedules {
+			if ctx.Err() != nil {
+				return nil
+			}
+			w.enqueueSchedule(schedule)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
 		}
 	}
 }
@@ -55,15 +73,22 @@ func (w *Worker) repeatBatches(ctx context.Context, name OperationName, batch in
 	}
 }
 
-func (w *Worker) enqueueDueSchedules(ctx context.Context) {
-	if len(w.schedules) == 0 {
-		return
-	}
-	// A scheduled job belongs to no request: it is enqueued on a context without the values of
-	// Run's context, so the propagators inject no identity or trace main put there. observe
-	// reports the error to the Observer; the next interval tries again.
-	_, _ = w.observe(context.Background(), OperationSchedules, func(operationContext context.Context) (int, error) {
-		return w.store.EnqueueDueSchedules(operationContext, w.schedules)
+// enqueueSchedule checks one schedule under its own operation timeout. A scheduled job belongs
+// to no request: it is enqueued on a context without the values of Run's context, so the
+// propagators inject no identity or trace main put there. A panic of the schedule's Next fails
+// this check only. observe reports the error to the Observer; the next interval tries again.
+func (w *Worker) enqueueSchedule(schedule Schedule) {
+	_, _ = w.observe(context.Background(), OperationSchedules, func(operationContext context.Context) (enqueued int, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				enqueued, err = 0, recovery.Error("schedule "+schedule.Name, recovered)
+			}
+		}()
+		wasDue, err := w.store.EnqueueDueSchedule(operationContext, schedule)
+		if wasDue {
+			enqueued = 1
+		}
+		return enqueued, err
 	})
 }
 

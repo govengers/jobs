@@ -390,9 +390,18 @@ func TestSchedulesEnqueueOncePerPeriodAcrossWorkers(t *testing.T) {
 	group, groupContext := errgroup.WithContext(ctx)
 	for worker := range 8 {
 		group.Go(func() error {
-			count, err := store.EnqueueDueSchedules(groupContext, []jobs.Schedule{schedule, registered})
+			count := 0
+			for _, each := range []jobs.Schedule{schedule, registered} {
+				enqueued, err := store.EnqueueDueSchedule(groupContext, each)
+				if err != nil {
+					return err
+				}
+				if enqueued {
+					count++
+				}
+			}
 			total.Store(worker, count)
-			return err
+			return nil
 		})
 	}
 	require.NoError(t, group.Wait())
@@ -420,10 +429,10 @@ func TestScheduleWithANonFutureNextIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	stuck := jobs.Schedule{Name: "stuck", Next: func(now time.Time) time.Time { return now.Add(-time.Hour) }, Job: mailKind.New(mailPayload{}, nil)}
 
-	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{stuck})
+	enqueued, err := store.EnqueueDueSchedule(ctx, stuck)
 
 	require.ErrorContains(t, err, "schedule stuck")
-	require.Zero(t, enqueued)
+	require.False(t, enqueued)
 	records, err := store.List(ctx, &postgresadapter.ListFilter{})
 	require.NoError(t, err)
 	require.Empty(t, records, "the transaction rolled back")
@@ -522,14 +531,13 @@ func TestScheduleWithANanosecondNextIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	tick := jobs.Schedule{Name: "tick", Next: func(now time.Time) time.Time { return now.Add(time.Nanosecond) }, Job: mailKind.New(mailPayload{}, nil)}
 
-	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{tick})
+	enqueued, err := store.EnqueueDueSchedule(ctx, tick)
 
 	require.ErrorContains(t, err, "schedule tick")
-	require.Zero(t, enqueued)
+	require.False(t, enqueued)
 }
 
-// Round 2, finding 7: every schedule has its own transaction; a refused one does not roll back
-// the others.
+// Round 2, finding 7: every schedule has its own transaction, and its errors name it.
 func TestAFailingScheduleDoesNotHoldBackTheOthers(t *testing.T) {
 	store, pool := newStore(t)
 	ctx := context.Background()
@@ -538,13 +546,79 @@ func TestAFailingScheduleDoesNotHoldBackTheOthers(t *testing.T) {
 	broken := jobs.Schedule{Name: "broken", Next: func(now time.Time) time.Time { return now }, Job: mailKind.New(mailPayload{}, nil)}
 	healthy := jobs.Schedule{Name: "healthy", Next: func(now time.Time) time.Time { return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{Recipient: "healthy"}, nil)}
 
-	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{broken, healthy})
+	_, brokenError := store.EnqueueDueSchedule(ctx, broken)
+	enqueued, healthyError := store.EnqueueDueSchedule(ctx, healthy)
 
-	require.ErrorContains(t, err, "schedule broken")
-	require.NotContains(t, err.Error(), "schedule healthy")
-	require.Equal(t, 1, enqueued)
+	require.ErrorContains(t, brokenError, "schedule broken")
+	require.NoError(t, healthyError)
+	require.True(t, enqueued)
 	records, err := store.List(ctx, &postgresadapter.ListFilter{})
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	require.JSONEq(t, `{"recipient":"healthy"}`, string(records[0].Payload))
+}
+
+// Round 3, finding 2 (Fable's test): a due schedule whose row another worker holds mid-enqueue
+// is skipped: nothing is enqueued and the call does not wait for that worker (J11).
+func TestADueScheduleHeldByAnotherWorkerIsSkipped(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('held', now() - interval '1 minute')")
+	require.NoError(t, err)
+	other, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = other.Rollback(ctx) }() // the other worker's transaction ends with the test
+	_, err = other.Exec(ctx, "SELECT 1 FROM govengers_job_schedules WHERE name = 'held' FOR UPDATE")
+	require.NoError(t, err)
+	held := jobs.Schedule{Name: "held", Next: func(now time.Time) time.Time { return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{}, nil)}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	enqueued, err := store.EnqueueDueSchedule(bounded, held)
+
+	require.NoError(t, err, "a held row is skipped, not waited for")
+	require.False(t, enqueued)
+	records, err := store.List(ctx, &postgresadapter.ListFilter{})
+	require.NoError(t, err)
+	require.Empty(t, records, "the other worker enqueues this period")
+}
+
+// Round 3, finding 1 (Fable's probe): a schedule whose enqueue waits on another transaction
+// (a pending job of the same unique key that has not committed) fails fast with its name,
+// within the lock timeout, and the next schedule enqueues.
+func TestABlockedScheduleFailsFastAndTheNextOneEnqueues(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('blocked', now() - interval '1 minute'), ('healthy', now() - interval '1 minute')")
+	require.NoError(t, err)
+	producer, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = producer.Rollback(ctx) }() // the producer never commits during the test
+	_, err = store.Enqueue(ctx, producer, mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "busy"}))
+	require.NoError(t, err)
+	blocked := jobs.Schedule{Name: "blocked", Next: func(now time.Time) time.Time { return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "busy"})}
+	healthy := jobs.Schedule{Name: "healthy", Next: func(now time.Time) time.Time { return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{Recipient: "healthy"}, nil)}
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, blockedError := store.EnqueueDueSchedule(bounded, blocked)
+	waited := time.Since(started)
+	enqueued, healthyError := store.EnqueueDueSchedule(bounded, healthy)
+
+	require.ErrorContains(t, blockedError, "schedule blocked")
+	require.Less(t, waited, 3*time.Second, "the lock timeout, not the caller's deadline, ends the wait")
+	require.NoError(t, healthyError)
+	require.True(t, enqueued)
+}
+
+// Round 3, finding 7: every error of a schedule names it, the database time included.
+func TestScheduleErrorsNameTheSchedule(t *testing.T) {
+	store, _ := newStore(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.EnqueueDueSchedule(cancelled, jobs.Schedule{Name: "nightly", Next: jobs.Every(time.Hour), Job: mailKind.New(mailPayload{}, nil)})
+
+	require.ErrorContains(t, err, "schedule nightly")
 }

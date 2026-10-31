@@ -171,33 +171,30 @@ SELECT EXISTS (
 UPDATE govengers_job_schedules SET next_run_at = $2, updated_at = now() WHERE name = $1`
 )
 
-// EnqueueDueSchedules implements jobs.Store. Every schedule has a transaction of its own that
-// registers, claims, enqueues and advances it, so its job is enqueued once per period however
-// many workers call this, and a schedule that fails (a refused Next, a failed enqueue) does not
-// hold back the others. The failures come back joined, each naming its schedule.
-func (s *Store) EnqueueDueSchedules(ctx context.Context, schedules []jobs.Schedule) (int, error) {
-	enqueued := 0
-	var failures []error
-	for _, schedule := range schedules {
-		wasDue, err := s.enqueueIfDue(ctx, schedule)
-		if err != nil {
-			failures = append(failures, err)
-			continue
-		}
-		if wasDue {
-			enqueued++
-		}
+// scheduleLockTimeout bounds every lock wait of a schedule's transaction (a pending job of the
+// same unique key in a transaction that has not committed yet): the schedule fails fast and is
+// tried again at the next check instead of holding the worker's schedule loop.
+const scheduleLockTimeout = "1s"
+
+// EnqueueDueSchedule implements jobs.Store.
+func (s *Store) EnqueueDueSchedule(ctx context.Context, schedule jobs.Schedule) (bool, error) {
+	enqueued, err := s.enqueueIfDue(ctx, schedule)
+	if err != nil {
+		return false, fmt.Errorf("schedule %s: %w", schedule.Name, err)
 	}
-	return enqueued, errors.Join(failures...)
+	return enqueued, nil
 }
 
-// enqueueIfDue runs one schedule's transaction and reports whether it enqueued the job.
+// enqueueIfDue runs the schedule's transaction and reports whether it enqueued the job.
 func (s *Store) enqueueIfDue(ctx context.Context, schedule jobs.Schedule) (bool, error) {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, wrapDriverError(err, "begin schedule %s", schedule.Name)
+		return false, wrapDriverError(err, "begin")
 	}
 	defer func() { _ = transaction.Rollback(ctx) }() // a no-op after Commit
+	if _, err := transaction.Exec(ctx, "SET LOCAL lock_timeout = '"+scheduleLockTimeout+"'"); err != nil {
+		return false, wrapDriverError(err, "set the lock timeout")
+	}
 	now, err := databaseNow(ctx, transaction)
 	if err != nil {
 		return false, err
@@ -211,7 +208,7 @@ func (s *Store) enqueueIfDue(ctx context.Context, schedule jobs.Schedule) (bool,
 			return false, err
 		}
 	}
-	return wasDue, wrapDriverError(transaction.Commit(ctx), "commit schedule %s", schedule.Name)
+	return wasDue, wrapDriverError(transaction.Commit(ctx), "commit")
 }
 
 // databaseNow is the transaction's now(): schedules compute their periods in database time.
@@ -229,23 +226,23 @@ func registerAndClaim(ctx context.Context, transaction pgx.Tx, schedule jobs.Sch
 		return false, err
 	}
 	if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, next); err != nil {
-		return false, wrapDriverError(err, "register schedule %s", schedule.Name)
+		return false, wrapDriverError(err, "register")
 	}
 	var due bool
 	err = transaction.QueryRow(ctx, claimDueSchedule, schedule.Name).Scan(&due)
-	return due, wrapDriverError(err, "claim schedule %s", schedule.Name)
+	return due, wrapDriverError(err, "claim")
 }
 
 func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) error {
 	if _, err := s.Enqueue(ctx, transaction, schedule.Job); err != nil {
-		return fmt.Errorf("enqueue schedule %s: %w", schedule.Name, err)
+		return fmt.Errorf("enqueue: %w", err)
 	}
 	next, err := nextRun(schedule, now)
 	if err != nil {
 		return err
 	}
 	if _, err := transaction.Exec(ctx, advanceSchedule, schedule.Name, next); err != nil {
-		return wrapDriverError(err, "advance schedule %s", schedule.Name)
+		return wrapDriverError(err, "advance")
 	}
 	return nil
 }
@@ -256,7 +253,7 @@ func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, sched
 func nextRun(schedule jobs.Schedule, now time.Time) (time.Time, error) {
 	next := schedule.Next(now)
 	if !next.Truncate(time.Microsecond).After(now.Truncate(time.Microsecond)) {
-		return time.Time{}, fmt.Errorf("schedule %s: Next(%s) returned %s, which is not after it", schedule.Name, now.Format(time.RFC3339Nano), next.Format(time.RFC3339Nano))
+		return time.Time{}, fmt.Errorf("Next(%s) returned %s, which is not after it", now.Format(time.RFC3339Nano), next.Format(time.RFC3339Nano))
 	}
 	return next, nil
 }

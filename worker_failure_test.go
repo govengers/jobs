@@ -523,3 +523,75 @@ func TestAWorkerCanBeUsedAgainAfterRunReturned(t *testing.T) {
 	require.Equal(t, 1, attempts)
 	require.Equal(t, jobs.StatusCompleted, harness.record(id).Status)
 }
+
+// Round 3, finding 1: a schedule whose enqueue waits on another transaction neither holds back
+// the next schedule nor the rescuer.
+func TestABlockedScheduleHoldsBackNeitherTheOthersNorTheRescuer(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	ctx := context.Background()
+	_, err := harness.pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('blocked', now() - interval '1 minute'), ('healthy', now() - interval '1 minute')")
+	require.NoError(t, err)
+	producer, err := harness.pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = producer.Rollback(ctx) }) // the producer never commits during the test
+	_, err = harness.store.Enqueue(ctx, producer, kind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "busy"}))
+	require.NoError(t, err)
+	worker := harness.worker(&jobs.WorkerOptions{Schedules: []jobs.Schedule{
+		{Name: "blocked", Next: jobs.Every(time.Hour), Job: kind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "busy"})},
+		{Name: "healthy", Next: jobs.Every(time.Hour), Job: kind.New(mailPayload{Recipient: "healthy"}, nil)},
+	}})
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+
+	harness.run(worker)
+
+	require.Eventually(t, func() bool {
+		records, err := harness.store.List(ctx, &postgresadapter.ListFilter{Status: jobs.StatusCompleted})
+		return err == nil && len(records) == 1
+	}, waitFor, pollEvery, "the healthy schedule's job ran")
+	rescues := harness.observer.count(jobs.OperationRescue)
+	require.Eventually(t, func() bool { return harness.observer.count(jobs.OperationRescue) >= rescues+20 }, 3*time.Second, pollEvery, "the rescuer keeps its interval while the blocked schedule waits")
+}
+
+// Round 3, finding 5: a Next that panics after construction fails its schedule's check, not Run.
+func TestAPanickingNextFailsOnlyItsSchedule(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	var calls atomic.Int32
+	worker := harness.worker(&jobs.WorkerOptions{Schedules: []jobs.Schedule{{
+		Name: "broken",
+		Next: func(now time.Time) time.Time {
+			if calls.Add(1) > 1 { // NewWorker's check is the first call
+				panic("bad next")
+			}
+			return now.Add(time.Hour)
+		},
+		Job: kind.New(mailPayload{}, nil),
+	}}})
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+
+	harness.run(worker)
+
+	require.Eventually(t, func() bool { return calls.Load() >= 3 }, waitFor, pollEvery, "the schedule is checked again and again")
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+	harness.eventuallyStatus(id, jobs.StatusCompleted) // the worker still runs; the cleanup asserts Run returns nil
+}
+
+// countingPayload counts how often it is encoded.
+type countingPayload struct{ encodings *atomic.Int32 }
+
+func (p countingPayload) MarshalJSON() ([]byte, error) {
+	p.encodings.Add(1)
+	return []byte(`{}`), nil
+}
+
+// Round 3, finding 8: NewWorker encodes a schedule's payload once.
+func TestNewWorkerEncodesAScheduledPayloadOnce(t *testing.T) {
+	encodings := &atomic.Int32{}
+	kind := jobs.NewKind[countingPayload]("count.encodings", &jobs.KindOptions{Queue: "mail"})
+
+	_, err := jobs.NewWorker(&jobs.WorkerOptions{Store: storeStub{}, Schedules: []jobs.Schedule{{Name: "counted", Next: jobs.Every(time.Hour), Job: kind.New(countingPayload{encodings: encodings}, nil)}}})
+
+	require.NoError(t, err)
+	require.Equal(t, int32(1), encodings.Load())
+}

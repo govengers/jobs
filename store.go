@@ -23,10 +23,11 @@ type Store interface {
 	// Sweep deletes up to request.Limit finished jobs older than their retention and returns
 	// how many it deleted.
 	Sweep(ctx context.Context, request *SweepRequest) (int, error)
-	// EnqueueDueSchedules registers the schedules that have no row yet, enqueues the job of
-	// every due schedule no other worker is enqueuing, advances it and returns how many jobs
-	// it enqueued.
-	EnqueueDueSchedules(ctx context.Context, schedules []Schedule) (int, error)
+	// EnqueueDueSchedule registers the schedule unless it has a row and, when it is due and no
+	// other worker holds its row, enqueues its job and advances it, in one transaction. It
+	// reports whether it enqueued. A row another worker holds is skipped, never waited for;
+	// errors name the schedule.
+	EnqueueDueSchedule(ctx context.Context, schedule Schedule) (bool, error)
 }
 
 // ClaimRequest asks the store for runnable jobs of one queue.
