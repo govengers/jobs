@@ -39,7 +39,7 @@ The worker claims only as many jobs as it has free slots, so no claimed job wait
 
 A handler is a job controller: it translates the job and calls a service method, the same method an HTTP controller calls (ARC-001, ARC-003). Map domain errors that no retry fixes (not found, invalid) to `jobs.Permanent` there; `jobs.Permanent(nil)` is nil, so a handler returning it completes.
 
-A bug on the handler's side is a failed attempt, never an error of `Run`: a panicking handler, a panicking `Backoff` (the attempt is retried with `DefaultBackoff`) or a panicking Observer (its report is dropped). A panic of the worker's own goroutines or of the `Store` ends `Run` with the error.
+A bug on the handler's side is a failed attempt, never an error of `Run`: a panicking handler, a panicking `Backoff` (the attempt is retried with `DefaultBackoff`) or a panicking Observer (its report is dropped). A panic of the worker's own goroutines or of the `Store` ends `Run` with the error. A propagator's `Inject` runs inside the store's enqueue, so on the schedule path a panicking `Inject` ends `Run` like a store panic, while a panicking `Extract` on the attempt path is a failed attempt; a schedule's `Next` is the one exception the store contains, its panic fails that schedule's check.
 
 ## Leases, heartbeat and fencing
 
