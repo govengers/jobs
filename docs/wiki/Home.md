@@ -32,7 +32,7 @@ Constructors are `New...(options *Options) (*X, error)` and validate at startup.
 3. Repositories get the store and enqueue on their transactions.
 4. `jobs.NewWorker` with the store, the consumed queues, `wideeventadapter.NewMiddleware`, the same propagators and `prometheusadapter.New` as Observer.
 5. `jobs.Handle` per kind, with the job controllers' methods.
-6. `group.Go(func() error { return worker.Run(ctx) })` next to the HTTP server; cancel on SIGTERM, wait for the group.
+6. `group.Go(recovering(func() error { return worker.Run(ctx) }))` next to the HTTP server (CON-001); cancel on SIGTERM, wait for the group.
 
 ## Pages
 

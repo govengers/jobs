@@ -11,7 +11,7 @@ require.Equal(t, 1, attempts)
 require.Len(t, fakeMailer.Sent(), 1)
 ```
 
-`Drain` calls `worker.RunDue`: it claims and runs batches until nothing runnable is left, with the real middleware and propagators, and fails the test on a store error. A retry waits for its backoff, so a failing job runs once per drain; give a kind `Backoff: func(int) time.Duration { return 0 }` in a test to run all its attempts. Do not call it while `Run` runs.
+`Drain` calls `worker.RunDue`: it claims and runs batches until nothing runnable is left, with the real middleware and propagators, and fails the test on a store error. A retry waits for its backoff, so a failing job runs once per drain; give a kind `Backoff: func(int) time.Duration { return 0 }` in a test to run all its attempts. A failed finish write fails the test, and so does a job that runs 100 times in one drain (a handler that snoozes without a delay). Do not call it while `Run` runs.
 
 The database is the test's own (TST-002, TST-013): an embedded PostgreSQL 18 per test binary and a fresh schema per test, migrated with your migrations including `postgresadapter.MigrationV1`. [examples/signup](../../examples/signup) shows the whole setup over HTTP.
 

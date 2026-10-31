@@ -1,5 +1,6 @@
 // Package controller is the example's transport layer: the HTTP routes and the job handlers
-// translate their transport and call the service (ARC-001).
+// translate their transport and call the service (ARC-001). The routes use net/http instead of
+// Gin, the standard router, only so the jobs module does not depend on Gin.
 package controller
 
 import (

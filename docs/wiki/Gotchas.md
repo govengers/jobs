@@ -8,7 +8,8 @@
 - **`time.Sleep` in a handler holds a slot.** Return `jobs.Snooze(delay)` instead.
 - **Retries need a backoff that fits.** The default doubles from 1 s and dies at the tenth attempt, about 9 minutes after the first failure. A provider that is down for an hour needs more attempts or a longer cap per kind.
 - **Depth gauges are per table.** Every replica reports the same `_pending`; `sum` multiplies it by the replica count. Use `max`.
-- **Propagators on both sides.** A propagator only on the store writes headers nobody reads; only on the worker it restores nothing.
+- **Propagators on both sides.** A propagator only on the store writes headers nobody reads; only on the worker it restores nothing. An `Inject` error fails the enqueue.
+- **`UniqueKey` needs READ COMMITTED.** A repository transaction at REPEATABLE READ gets `ErrSerializationFailure` for a concurrent enqueue of the same key; retry the transaction.
 - **Identity snapshots are old.** A job runs with the identity of the moment it was enqueued. Check revocable permissions again in the handler.
 - **`RunDue` is not a worker.** It runs without heartbeats; a test handler that blocks longer than the lease loses its job to the rescuer of another worker sharing the database.
 - **One worker per process and queue set.** Two workers in one process with the same queues work, but double the polling for nothing.
