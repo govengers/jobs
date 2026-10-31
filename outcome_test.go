@@ -33,12 +33,18 @@ func TestDecide(t *testing.T) {
 		{name: "cancelled", attempt: 1, handlerError: failure, cause: ErrCancelled, wantFinish: true, wantStatus: StatusCancelled, wantErrorText: "upstream down", wantResult: ResultCancelled},
 		{name: "shutdown releases", attempt: 3, handlerError: failure, cause: errShutdown, wantFinish: true, wantStatus: StatusPending, wantReturned: true, wantErrorText: "upstream down", wantResult: ResultReleased},
 		{name: "lease lost writes nothing", attempt: 1, handlerError: failure, cause: ErrLeaseLost, wantResult: ResultLeaseLost},
+		{name: "Permanent(nil) completes", attempt: 1, handlerError: Permanent(nil), wantFinish: true, wantStatus: StatusCompleted, wantResult: ResultCompleted},
+		{name: "a negative backoff runs now", attempt: 1, handlerError: failure, wantFinish: true, wantStatus: StatusPending, wantErrorText: "upstream down", wantResult: ResultRetried},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			claim := &Claim{Lease: Lease{JobID: uuid.New(), Token: uuid.New()}, Attempt: test.attempt, MaximumAttempts: 3}
+			backoff := fixedBackoff
+			if test.name == "a negative backoff runs now" {
+				backoff = func(int) time.Duration { return -time.Hour }
+			}
 
-			finish, result := decide(claim, test.handlerError, test.cause, fixedBackoff)
+			finish, result := decide(claim, test.handlerError, test.cause, backoff)
 
 			require.Equal(t, test.wantResult, result)
 			if !test.wantFinish {
@@ -140,4 +146,41 @@ func TestKindDefaultsAndValidation(t *testing.T) {
 
 	_, err = (&NewJob{}).EncodePayload()
 	require.ErrorIs(t, err, ErrInvalidKind, "a zero NewJob is an invalid kind, not a database error")
+}
+
+func TestPermanentErrorWithoutCauseFormats(t *testing.T) {
+	require.Equal(t, "permanent", (&permanentError{}).Error())
+}
+
+func TestDecideRecoveringSurvivesAPanickingBackoff(t *testing.T) {
+	claim := &Claim{Lease: Lease{JobID: uuid.New(), Token: uuid.New()}, Attempt: 1, MaximumAttempts: 3}
+
+	finish, result := decideRecovering(claim, errors.New("upstream down"), nil, func(int) time.Duration { panic("bad backoff") })
+
+	require.Equal(t, ResultRetried, result)
+	require.Equal(t, StatusPending, finish.Status)
+	require.Contains(t, finish.Error, "panicked: bad backoff")
+	require.GreaterOrEqual(t, finish.Delay, time.Second, "the default backoff replaces the broken one")
+}
+
+func TestStoredResult(t *testing.T) {
+	writeError := errors.New("connection reset")
+	tests := []struct {
+		name       string
+		decided    Result
+		stored     Status
+		writeError error
+		want       Result
+	}{
+		{name: "written as decided", decided: ResultRetried, stored: StatusPending, want: ResultRetried},
+		{name: "write failed", decided: ResultCompleted, writeError: writeError, want: ResultFinishFailed},
+		{name: "lease gone", decided: ResultDead, want: ResultFenced},
+		{name: "a cancel request turned the retry into cancelled", decided: ResultRetried, stored: StatusCancelled, want: ResultCancelled},
+		{name: "a cancel request turned the release into cancelled", decided: ResultReleased, stored: StatusCancelled, want: ResultCancelled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, storedResult(test.decided, test.stored, test.writeError))
+		})
+	}
 }

@@ -61,8 +61,12 @@ func (harness *testHarness) worker(options *jobs.WorkerOptions) *jobs.Worker {
 	if options == nil {
 		options = &jobs.WorkerOptions{}
 	}
-	options.Store = harness.store
-	options.Observer = harness.observer
+	if options.Store == nil {
+		options.Store = harness.store
+	}
+	if options.Observer == nil {
+		options.Observer = harness.observer
+	}
 	if options.Queues == nil {
 		options.Queues = map[string]jobs.QueueOptions{"mail": {Concurrency: 2, Lease: testLease, PollInterval: pollEvery}}
 	}

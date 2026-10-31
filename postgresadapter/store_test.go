@@ -216,14 +216,14 @@ func TestStaleFinishIsFencedAfterTheLeaseWasRescued(t *testing.T) {
 	require.Equal(t, 1, rescued)
 	current := claimOne(t, store, lease)
 
-	written, err := store.Finish(ctx, &jobs.Finish{Lease: stale.Lease, Status: jobs.StatusCompleted})
+	stored, err := store.Finish(ctx, &jobs.Finish{Lease: stale.Lease, Status: jobs.StatusCompleted})
 	require.NoError(t, err)
-	require.False(t, written, "the stale worker must not overwrite the newer attempt")
+	require.Empty(t, stored, "the stale worker must not overwrite the newer attempt")
 	require.Equal(t, jobs.StatusRunning, get(t, store, id).Status)
 
-	written, err = store.Finish(ctx, &jobs.Finish{Lease: current.Lease, Status: jobs.StatusCompleted})
+	stored, err = store.Finish(ctx, &jobs.Finish{Lease: current.Lease, Status: jobs.StatusCompleted})
 	require.NoError(t, err)
-	require.True(t, written)
+	require.Equal(t, jobs.StatusCompleted, stored)
 	record := get(t, store, id)
 	require.Equal(t, jobs.StatusCompleted, record.Status)
 	require.Equal(t, 2, record.Attempt, "the rescued attempt counts")
@@ -236,10 +236,10 @@ func TestFinishRetryDelaysAndRecordsTheError(t *testing.T) {
 	claim := claimOne(t, store, lease)
 	before := time.Now()
 
-	written, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Hour, Error: "upstream down"})
+	stored, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Hour, Error: "upstream down"})
 
 	require.NoError(t, err)
-	require.True(t, written)
+	require.Equal(t, jobs.StatusPending, stored)
 	record := get(t, store, id)
 	require.Equal(t, jobs.StatusPending, record.Status)
 	require.Equal(t, 1, record.Attempt)
@@ -284,12 +284,12 @@ func TestExtendLeases(t *testing.T) {
 
 	leases, err := store.ExtendLeases(ctx, []jobs.Lease{held.Lease, foreign}, lease)
 	require.NoError(t, err)
-	require.Equal(t, []jobs.HeldLease{{JobID: held.Lease.JobID}}, leases)
+	require.Equal(t, []jobs.HeldLease{{Lease: held.Lease}}, leases)
 
 	require.NoError(t, store.Cancel(ctx, held.Lease.JobID))
 	leases, err = store.ExtendLeases(ctx, []jobs.Lease{held.Lease}, lease)
 	require.NoError(t, err)
-	require.Equal(t, []jobs.HeldLease{{JobID: held.Lease.JobID, CancelRequested: true}}, leases)
+	require.Equal(t, []jobs.HeldLease{{Lease: held.Lease, CancelRequested: true}}, leases)
 
 	leases, err = store.ExtendLeases(ctx, nil, lease)
 	require.NoError(t, err)
@@ -303,9 +303,10 @@ func TestFinishPendingOfACancelledJobCancelsIt(t *testing.T) {
 	claim := claimOne(t, store, lease)
 	require.NoError(t, store.Cancel(ctx, id))
 
-	_, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Minute, ReturnAttempt: true})
+	stored, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Minute, ReturnAttempt: true})
 
 	require.NoError(t, err)
+	require.Equal(t, jobs.StatusCancelled, stored, "Finish returns the status it stored, not the one it was asked for")
 	record := get(t, store, id)
 	require.Equal(t, jobs.StatusCancelled, record.Status)
 	require.NotNil(t, record.FinishedAt)
@@ -359,9 +360,9 @@ func TestSweep(t *testing.T) {
 func finish(t *testing.T, store *postgresadapter.Store, status jobs.Status) {
 	t.Helper()
 	claim := claimOne(t, store, lease)
-	written, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: status})
+	stored, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: status})
 	require.NoError(t, err)
-	require.True(t, written)
+	require.Equal(t, status, stored)
 }
 
 func TestSchedulesEnqueueOncePerPeriodAcrossWorkers(t *testing.T) {

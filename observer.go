@@ -19,7 +19,7 @@ type Outcome struct {
 	Claim    *Claim
 	Result   Result
 	Duration time.Duration // the handler's run time
-	Err      error         // the handler's error, or the finish write's error
+	Err      error         // the handler's error joined with the finish write's error; nil when both are nil
 }
 
 // OperationName names a background store operation of the worker.

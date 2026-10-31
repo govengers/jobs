@@ -7,12 +7,11 @@ package wideeventadapter
 import (
 	"context"
 	"errors"
-	"fmt"
-	"runtime/debug"
 
 	wideevent "github.com/govengers/wide-event-logger"
 
 	"github.com/govengers/jobs"
+	"github.com/govengers/jobs/internal/recovery"
 )
 
 // The fields the middleware records, besides the event name job.<queue>, outcome and error.
@@ -47,7 +46,7 @@ func NewMiddleware(options *Options) (jobs.Middleware, error) {
 			we := begin(emitter, claim)
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					err = fmt.Errorf("job %s panicked: %v\n%s", claim.Lease.JobID, recovered, debug.Stack())
+					err = recovery.Error("job "+claim.Lease.JobID.String(), recovered)
 				}
 				finish(ctx, we, err)
 			}()
