@@ -323,3 +323,76 @@ func TestRunDueStopsAJobThatSnoozesWithoutADelay(t *testing.T) {
 	require.ErrorContains(t, err, id.String())
 	require.Equal(t, jobs.MaximumRunsPerJob, attempts)
 }
+
+// Finding 8: the heartbeat keeps a job that runs for several lease lengths, with a rescuer
+// polling every 20 ms; a heartbeat slower than Lease/3 loses it.
+func TestAJobLongerThanItsLeaseKeepsItsLease(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(nil)
+	release := make(chan struct{})
+	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+
+	harness.run(worker)
+	require.Eventually(t, func() bool { return harness.observer.count(jobs.OperationExtendLeases) >= 4*3 }, waitFor, pollEvery, "four lease lengths of heartbeats")
+	close(release)
+
+	record := harness.eventuallyStatus(id, jobs.StatusCompleted)
+	require.Equal(t, 1, record.Attempt)
+	requireNoLostAttempt(t, harness.observer.results())
+}
+
+// Finding 8: a finish the store fences out is reported as fenced.
+func TestAFencedFinishIsReportedAsFenced(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(&jobs.WorkerOptions{Store: &faultyStore{Store: harness.store, finish: func(context.Context, *jobs.Finish) (jobs.Status, error) {
+		return "", nil // the lease was gone
+	}}})
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+
+	harness.run(worker)
+
+	require.Eventually(t, func() bool { return len(harness.observer.outcomesOf(id)) >= 1 }, waitFor, pollEvery)
+	require.Equal(t, jobs.ResultFenced, harness.observer.outcomesOf(id)[0].Result)
+}
+
+// Finding 8 (J4): a worker claims at most its free slots, so it never holds leases of jobs it
+// cannot run yet.
+func TestTheWorkerClaimsOnlyItsFreeSlots(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(&jobs.WorkerOptions{Name: "two-slots", Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 2, Lease: testLease, PollInterval: pollEvery}}})
+	var running atomic.Int32
+	release := make(chan struct{})
+	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
+		running.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}))
+	for range 4 {
+		harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+	}
+
+	harness.run(worker)
+	require.Eventually(t, func() bool { return running.Load() == 2 }, waitFor, pollEvery)
+	rescues := harness.observer.count(jobs.OperationRescue)
+	require.Eventually(t, func() bool { return harness.observer.count(jobs.OperationRescue) >= rescues+10 }, waitFor, pollEvery, "many poll intervals pass while both slots are busy")
+
+	var leased int
+	require.NoError(t, harness.pool.QueryRow(context.Background(), "SELECT count(*) FROM govengers_jobs WHERE status = 'running' AND worker = 'two-slots'").Scan(&leased))
+	require.Equal(t, 2, leased)
+	close(release)
+}

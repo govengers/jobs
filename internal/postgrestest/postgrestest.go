@@ -16,7 +16,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
@@ -92,6 +95,7 @@ func New(t *testing.T) *pgxpool.Pool {
 }
 
 func (s *server) start() {
+	stopOrphans()
 	binaries, err := unpackedBinaries()
 	if err != nil {
 		s.err = err
@@ -102,7 +106,10 @@ func (s *server) start() {
 		s.err = err
 		return
 	}
-	if s.directory, s.err = os.MkdirTemp("", "jobs-postgrestest-"); s.err != nil {
+	if s.directory, s.err = os.MkdirTemp("", instancePrefix); s.err != nil {
+		return
+	}
+	if s.err = os.WriteFile(filepath.Join(s.directory, ownerFile), []byte(strconv.Itoa(os.Getpid())), 0o600); s.err != nil {
 		return
 	}
 	postgres := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
@@ -116,6 +123,43 @@ func (s *server) start() {
 	}
 	s.postgres = postgres
 	s.url = fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
+}
+
+// instancePrefix names the directories of the test binaries' PostgreSQL instances; ownerFile
+// in each holds the process ID of the test binary that started it.
+const (
+	instancePrefix = "jobs-postgrestest-"
+	ownerFile      = "owner"
+)
+
+// stopOrphans stops the instances of test binaries that died before Main could stop them (a
+// killed binary, a test timeout) and removes their directories, so they do not pile up.
+func stopOrphans() {
+	directories, _ := filepath.Glob(filepath.Join(os.TempDir(), instancePrefix+"*")) // a bad pattern is impossible here
+	for _, directory := range directories {
+		owner, err := os.ReadFile(filepath.Join(directory, ownerFile)) //nolint:gosec // G304: a directory of this harness, found by its own prefix
+		if err != nil || alive(string(owner)) {
+			continue // not ours, or its test binary still runs
+		}
+		if postmaster, err := os.ReadFile(filepath.Join(directory, "runtime", "data", "postmaster.pid")); err == nil { //nolint:gosec // G304: same directory
+			_ = signal(strings.TrimSpace(strings.SplitN(string(postmaster), "\n", 2)[0]), os.Interrupt) // fast shutdown; gone already is fine
+		}
+		_ = os.RemoveAll(directory) // a leftover directory is harmless
+	}
+}
+
+func alive(processID string) bool { return signal(processID, syscall.Signal(0)) == nil }
+
+func signal(processID string, sent os.Signal) error {
+	number, err := strconv.Atoi(strings.TrimSpace(processID))
+	if err != nil {
+		return err
+	}
+	process, err := os.FindProcess(number)
+	if err != nil {
+		return err
+	}
+	return process.Signal(sent)
 }
 
 // unpackedBinaries unpacks the PostgreSQL binaries once per machine: unpacking inside a -race
