@@ -201,6 +201,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		group.Go(recovering(func() error { return runner.run(groupContext) }))
 	}
 	group.Go(recovering(func() error { return w.maintain(groupContext) }))
+	if len(w.schedules) > 0 {
+		group.Go(recovering(func() error { return w.enqueueSchedules(groupContext) }))
+	}
 	return group.Wait()
 }
 

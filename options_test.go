@@ -36,6 +36,9 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 		"daily at 24:00": {Store: storeStub{}, Schedules: []jobs.Schedule{{
 			Name: "digest", Next: jobs.DailyAt(24, 0, time.UTC), Job: kind.New(mailPayload{}, nil),
 		}}},
+		"panicking next": {Store: storeStub{}, Schedules: []jobs.Schedule{{
+			Name: "digest", Next: func(time.Time) time.Time { panic("bad next") }, Job: kind.New(mailPayload{}, nil),
+		}}},
 		"nil middleware": {Store: storeStub{}, Middleware: []jobs.Middleware{nil}},
 		"nil propagator": {Store: storeStub{}, Propagators: []jobs.Propagator{nil}},
 	}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/govengers/jobs/internal/recovery"
 )
 
 // minimumLeaseDuration keeps the heartbeat interval (Lease/3) meaningful.
@@ -88,12 +90,23 @@ func validateSchedules(schedules []Schedule) error {
 			return fmt.Errorf("jobs: schedule %s is declared twice", schedule.Name)
 		}
 		names[schedule.Name] = true
-		if !schedule.Next(now).After(now) {
-			return fmt.Errorf("jobs: schedule %s: Next must return a time after now", schedule.Name)
+		if err := checkNext(schedule, now); err != nil {
+			return err
 		}
-		if _, err := schedule.Job.EncodePayload(); err != nil {
-			return fmt.Errorf("jobs: schedule %s: %w", schedule.Name, err)
+	}
+	return nil
+}
+
+// checkNext calls the schedule's Next once and refuses a time that is not after now, or a panic.
+// The payload is not encoded here: snapshotSchedules encodes it, once.
+func checkNext(schedule Schedule, now time.Time) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("jobs: %w", recovery.Error("schedule "+schedule.Name+": Next", recovered))
 		}
+	}()
+	if !schedule.Next(now).After(now) {
+		return fmt.Errorf("jobs: schedule %s: Next must return a time after now", schedule.Name)
 	}
 	return nil
 }

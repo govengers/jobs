@@ -13,7 +13,7 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Schedules: []jobs.Schedul
 
 ## How it stays once per period
 
-Every worker checks its schedules every `ScheduleInterval` (10 s). The schedule's row in `govengers_job_schedules` holds `next_run_at`. A worker locks the due row with `SKIP LOCKED`, enqueues the job and advances `next_run_at` in one transaction, so another worker either waits for that transaction or skips the row. No leader election, no cron library, no `time.Ticker` per replica (which would run the job once per replica).
+Every worker checks its schedules every `ScheduleInterval` (10 s). The schedule's row in `govengers_job_schedules` holds `next_run_at`. A worker locks the due row with `SKIP LOCKED`, enqueues the job and advances `next_run_at` in one transaction, so another worker skips the row while that transaction runs (`SKIP LOCKED` never waits) and finds it advanced afterwards. No leader election, no cron library, no `time.Ticker` per replica (which would run the job once per replica).
 
 - The first worker that sees a schedule registers it with `next_run_at = Next(now)`; the first run is at the next boundary, not at startup.
 - `Next` must return a time after now and must give every replica the same boundaries: `jobs.Every` aligns to multiples of the interval, `jobs.DailyAt` to a wall-clock time in a location.
@@ -24,4 +24,4 @@ Every worker checks its schedules every `ScheduleInterval` (10 s). The schedule'
 
 The job a schedule enqueues is an ordinary job: retried, observed, idempotent like any other. Two differences: it is enqueued on a context without the values of `Run`'s context, so the propagators carry no identity or trace into it (an identity `main` put on `Run`'s context does not audit every scheduled job), and `NewWorker` encodes its payload once, so changing the payload value afterwards changes nothing.
 
-Each schedule has a transaction of its own per check: a schedule whose `Next` is refused or whose enqueue fails is reported (a failed `schedules` operation naming it) and does not hold back the others. `Next` is compared with now at the database's microsecond precision, so a `Next` one nanosecond after now is refused too. `DailyAt` with an hour outside 0..23 or a minute outside 0..59 is rejected by `NewWorker`.
+Each schedule has a transaction of its own per check, under its own operation timeout and a 1 s lock timeout: a schedule whose `Next` is refused or panics, or whose enqueue fails or waits on another transaction (a pending job of the same unique key that has not committed yet), is reported (a failed `schedules` operation naming it) and does not hold back the others. Schedules run in a loop of their own, so they never delay the rescuer or the sweep. `Next` is compared with now at the database's microsecond precision, so a `Next` one nanosecond after now is refused too. `DailyAt` with an hour outside 0..23 or a minute outside 0..59 is rejected by `NewWorker`.
