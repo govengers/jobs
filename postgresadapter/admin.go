@@ -151,3 +151,31 @@ func (s *Store) explainMiss(ctx context.Context, id uuid.UUID, wrongStatus error
 	}
 	return fmt.Errorf("%s job %s: %w", operation, id, wrongStatus)
 }
+
+const queueDepths = `
+SELECT queue,
+    count(*) FILTER (WHERE status = 'pending' AND run_at <= now()),
+    count(*) FILTER (WHERE status = 'pending' AND run_at > now()),
+    count(*) FILTER (WHERE status = 'running'),
+    COALESCE(EXTRACT(EPOCH FROM now() - min(run_at) FILTER (WHERE status = 'pending' AND run_at <= now())), 0)::float8
+FROM govengers_jobs
+WHERE status IN ('pending', 'running')
+GROUP BY queue
+ORDER BY queue`
+
+// QueueDepths returns the backlog of every queue with pending or running jobs, for the depth
+// gauges of prometheusadapter. Queues without such jobs are absent.
+func (s *Store) QueueDepths(ctx context.Context) ([]jobs.QueueDepth, error) {
+	rows, err := s.pool.Query(ctx, queueDepths)
+	if err != nil {
+		return nil, wrapDriverError(err, "read queue depths")
+	}
+	depths, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (jobs.QueueDepth, error) {
+		var depth jobs.QueueDepth
+		var oldestSeconds float64
+		err := row.Scan(&depth.Queue, &depth.Pending, &depth.Scheduled, &depth.Running, &oldestSeconds)
+		depth.OldestPendingAge = time.Duration(oldestSeconds * float64(time.Second))
+		return depth, err
+	})
+	return depths, wrapDriverError(err, "read queue depths")
+}

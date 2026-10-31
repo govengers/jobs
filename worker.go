@@ -190,6 +190,46 @@ func (w *Worker) Run(ctx context.Context) error {
 	return group.Wait()
 }
 
+// RunDue claims and runs every runnable job of the consumed queues, a batch of Concurrency
+// jobs per queue at a time, one job after the other and without heartbeats, until none is
+// left, and returns how many attempts it ran. A retry that waits for its backoff is not
+// runnable. It is meant for tests (jobstest.Drain) and one-off commands, and returns an error
+// while Run runs.
+func (w *Worker) RunDue(ctx context.Context) (int, error) {
+	w.mutex.Lock()
+	if w.running {
+		w.mutex.Unlock()
+		return 0, errWorkerRunning
+	}
+	handlers := w.wrappedHandlers()
+	w.mutex.Unlock()
+	attempts := 0
+	for {
+		ran, err := w.runDueBatches(ctx, handlers)
+		attempts += ran
+		if err != nil || ran == 0 {
+			return attempts, err
+		}
+	}
+}
+
+// runDueBatches runs one claimed batch of every queue synchronously.
+func (w *Worker) runDueBatches(ctx context.Context, handlers map[string]registeredHandler) (int, error) {
+	ran := 0
+	for queue, options := range w.queues {
+		runner := newQueueRunner(w, queue, options, handlers, nil)
+		claims, err := runner.claim(ctx, options.Concurrency)
+		if err != nil {
+			return ran, fmt.Errorf("jobs: claim jobs of queue %s: %w", queue, err)
+		}
+		for _, claim := range claims {
+			runner.attempt(ctx, claim)
+		}
+		ran += len(claims)
+	}
+	return ran, ctx.Err()
+}
+
 // start freezes the handlers and wraps them in the middleware.
 func (w *Worker) start() (map[string]registeredHandler, error) {
 	w.mutex.Lock()
@@ -198,11 +238,16 @@ func (w *Worker) start() (map[string]registeredHandler, error) {
 		return nil, errWorkerRunning
 	}
 	w.running = true
+	return w.wrappedHandlers(), nil
+}
+
+// wrappedHandlers wraps every registered handler in the middleware; the caller holds the mutex.
+func (w *Worker) wrappedHandlers() map[string]registeredHandler {
 	wrapped := make(map[string]registeredHandler, len(w.handlers))
 	for kind, registered := range w.handlers {
 		wrapped[kind] = registeredHandler{handler: w.wrap(registered.handler), backoff: registered.backoff}
 	}
-	return wrapped, nil
+	return wrapped
 }
 
 func (w *Worker) wrap(handler Handler) Handler {

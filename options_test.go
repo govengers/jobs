@@ -66,4 +66,6 @@ func TestRunOnlyOnce(t *testing.T) {
 		return jobs.Handle(worker, jobs.NewKind[mailPayload]("late", &jobs.KindOptions{Queue: "mail"}), func(context.Context, *jobs.Job[mailPayload]) error { return nil }) != nil
 	}, waitFor, pollEvery, "Handle after Run must fail")
 	require.Error(t, worker.Run(context.Background()))
+	_, err := worker.RunDue(context.Background())
+	require.Error(t, err, "RunDue while Run runs")
 }

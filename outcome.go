@@ -23,6 +23,12 @@ func Permanent(err error) error {
 	return &permanentError{err: err}
 }
 
+// IsPermanent reports whether err, or an error it wraps, was marked with Permanent.
+func IsPermanent(err error) bool {
+	var permanent *permanentError
+	return errors.As(err, &permanent)
+}
+
 type permanentError struct{ err error }
 
 func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
@@ -32,6 +38,16 @@ func (e *permanentError) Unwrap() error { return e.err }
 // precondition that is not met yet. A handler returns it instead of an error.
 func Snooze(delay time.Duration) error {
 	return &snoozeError{delay: delay}
+}
+
+// SnoozeDelay reports whether err, or an error it wraps, is a Snooze, and its delay. Middleware
+// uses it to tell a snooze from a failure.
+func SnoozeDelay(err error) (time.Duration, bool) {
+	var snooze *snoozeError
+	if errors.As(err, &snooze) {
+		return snooze.delay, true
+	}
+	return 0, false
 }
 
 type snoozeError struct{ delay time.Duration }
@@ -77,11 +93,10 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 		return finish, ResultCompleted
 	}
 	finish.Error = handlerError.Error()
-	var snooze *snoozeError
-	var permanent *permanentError
+	snoozeDelay, snoozed := SnoozeDelay(handlerError)
 	switch {
-	case errors.As(handlerError, &snooze):
-		finish.Status, finish.Delay, finish.ReturnAttempt, finish.Error = StatusPending, snooze.delay, true, ""
+	case snoozed:
+		finish.Status, finish.Delay, finish.ReturnAttempt, finish.Error = StatusPending, snoozeDelay, true, ""
 		return finish, ResultSnoozed
 	case errors.Is(cause, ErrCancelled):
 		finish.Status = StatusCancelled
@@ -89,7 +104,7 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 	case errors.Is(cause, errShutdown):
 		finish.Status, finish.ReturnAttempt = StatusPending, true
 		return finish, ResultReleased
-	case errors.As(handlerError, &permanent), claim.Attempt >= claim.MaxAttempts:
+	case IsPermanent(handlerError), claim.Attempt >= claim.MaxAttempts:
 		finish.Status = StatusDead
 		return finish, ResultDead
 	default:
