@@ -3,12 +3,12 @@
 A schedule enqueues its job once per period across all replicas.
 
 ```go
-nightlyReport := &jobs.Schedule{
+nightlyReport := jobs.Schedule{
     Name: "billing.nightly-report",                          // unique per database
     Next: jobs.DailyAt(3, 0, berlin),                       // or jobs.Every(15 * time.Minute)
     Job:  model.ReportKind.New(model.ReportPayload{}, nil), // enqueued at the start of every period
 }
-worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Schedules: []*jobs.Schedule{nightlyReport}})
+worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Schedules: []jobs.Schedule{nightlyReport}})
 ```
 
 ## How it stays once per period
@@ -22,4 +22,6 @@ Every worker checks its schedules every `ScheduleInterval` (10 s). The schedule'
 - A `Next` that returns a time not after now fails the schedule's transaction (reported to the Observer as a failed `schedules` operation) instead of leaving the schedule due on every poll.
 - Changing `Next` takes effect after the period already stored. Renaming a schedule starts a new row; the old row stays until you delete it.
 
-The job a schedule enqueues is an ordinary job: retried, observed, idempotent like any other.
+The job a schedule enqueues is an ordinary job: retried, observed, idempotent like any other. Two differences: it is enqueued on a context without the values of `Run`'s context, so the propagators carry no identity or trace into it (an identity `main` put on `Run`'s context does not audit every scheduled job), and `NewWorker` encodes its payload once, so changing the payload value afterwards changes nothing.
+
+Each schedule has a transaction of its own per check: a schedule whose `Next` is refused or whose enqueue fails is reported (a failed `schedules` operation naming it) and does not hold back the others. `Next` is compared with now at the database's microsecond precision, so a `Next` one nanosecond after now is refused too. `DailyAt` with an hour outside 0..23 or a minute outside 0..59 is rejected by `NewWorker`.

@@ -59,8 +59,10 @@ func (w *Worker) enqueueDueSchedules(ctx context.Context) {
 	if len(w.schedules) == 0 {
 		return
 	}
-	// observe reports the error to the Observer; the next interval tries again
-	_, _ = w.observe(ctx, OperationSchedules, func(operationContext context.Context) (int, error) {
+	// A scheduled job belongs to no request: it is enqueued on a context without the values of
+	// Run's context, so the propagators inject no identity or trace main put there. observe
+	// reports the error to the Observer; the next interval tries again.
+	_, _ = w.observe(context.Background(), OperationSchedules, func(operationContext context.Context) (int, error) {
 		return w.store.EnqueueDueSchedules(operationContext, w.schedules)
 	})
 }

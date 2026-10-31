@@ -568,3 +568,36 @@ func TestNewWorkerOwnsItsSchedules(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"original"}, names)
 }
+
+type digestPayload struct {
+	Recipients map[string]string `json:"recipients"`
+}
+
+// Round 2, findings 8 and 9: a scheduled job carries no value of Run's context, and its payload
+// is the one the schedule had at NewWorker.
+func TestAScheduledJobIsFreeOfRunsContextAndKeepsItsPayload(t *testing.T) {
+	harness := newHarness(t)
+	_, err := harness.pool.Exec(context.Background(), "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('digest', now() - interval '1 minute')")
+	require.NoError(t, err)
+	recipients := map[string]string{"team": "team@example.com"}
+	digestKind := jobs.NewKind[digestPayload]("mail.digest", &jobs.KindOptions{Queue: "mail"})
+	worker := harness.worker(&jobs.WorkerOptions{Schedules: []jobs.Schedule{{Name: "digest", Next: jobs.Every(time.Hour), Job: digestKind.New(digestPayload{Recipients: recipients}, nil)}}})
+	recipients["intruder"] = "changed after NewWorker"
+	require.NoError(t, jobs.Handle(worker, digestKind, func(context.Context, *jobs.Job[digestPayload]) error { return nil }))
+	runContext, cancel := context.WithCancel(context.WithValue(context.Background(), tenantKey{}, "tenant-of-main"))
+	returned := make(chan error, 1)
+	go func() { returned <- worker.Run(runContext) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-returned)
+	})
+
+	var records []*postgresadapter.Record
+	require.Eventually(t, func() bool {
+		records, err = harness.store.List(context.Background(), &postgresadapter.ListFilter{Queue: "mail"})
+		return err == nil && len(records) == 1
+	}, waitFor, pollEvery)
+
+	require.Empty(t, records[0].Headers, "no tenant from Run's context")
+	require.JSONEq(t, `{"recipients":{"team":"team@example.com"}}`, string(records[0].Payload))
+}

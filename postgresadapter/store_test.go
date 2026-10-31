@@ -512,3 +512,39 @@ func TestEnqueueFailsWhenAPropagatorCannotCarryItsValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
+
+// Round 2, finding 5: a Next one nanosecond after now is now at the database's microsecond
+// precision, so it is refused like any Next that does not move forward.
+func TestScheduleWithANanosecondNextIsRefused(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('tick', now() - interval '1 minute')")
+	require.NoError(t, err)
+	tick := jobs.Schedule{Name: "tick", Next: func(now time.Time) time.Time { return now.Add(time.Nanosecond) }, Job: mailKind.New(mailPayload{}, nil)}
+
+	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{tick})
+
+	require.ErrorContains(t, err, "schedule tick")
+	require.Zero(t, enqueued)
+}
+
+// Round 2, finding 7: every schedule has its own transaction; a refused one does not roll back
+// the others.
+func TestAFailingScheduleDoesNotHoldBackTheOthers(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('broken', now() - interval '1 minute'), ('healthy', now() - interval '1 minute')")
+	require.NoError(t, err)
+	broken := jobs.Schedule{Name: "broken", Next: func(now time.Time) time.Time { return now }, Job: mailKind.New(mailPayload{}, nil)}
+	healthy := jobs.Schedule{Name: "healthy", Next: func(now time.Time) time.Time { return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{Recipient: "healthy"}, nil)}
+
+	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{broken, healthy})
+
+	require.ErrorContains(t, err, "schedule broken")
+	require.NotContains(t, err.Error(), "schedule healthy")
+	require.Equal(t, 1, enqueued)
+	records, err := store.List(ctx, &postgresadapter.ListFilter{})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.JSONEq(t, `{"recipient":"healthy"}`, string(records[0].Payload))
+}

@@ -10,7 +10,7 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{
     Middleware:  []jobs.Middleware{wideEvents},          // first is outermost
     Propagators: []jobs.Propagator{authadapter.Identity()},
     Observer:    jobMetrics,                            // prometheusadapter.New
-    Schedules:   []*jobs.Schedule{nightlyReport},
+    Schedules:   []jobs.Schedule{nightlyReport},
 })
 err = jobs.Handle(worker, model.WelcomeMailKind, mailJobController.SendWelcomeMail)
 group.Go(recovering(func() error { return worker.Run(ctx) })) // CON-001
