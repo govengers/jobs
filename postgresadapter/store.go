@@ -73,19 +73,19 @@ SELECT id FROM govengers_jobs WHERE queue = $1 AND unique_key = $2 AND status = 
 // A UniqueKey needs READ COMMITTED, PostgreSQL's default. Under REPEATABLE READ or SERIALIZABLE
 // a pending job with the same key that committed after the transaction's snapshot makes the
 // insert fail with ErrSerializationFailure; retry the whole transaction then.
-func (s *Store) Enqueue(ctx context.Context, executor Executor, newJobs ...*jobs.NewJob) ([]uuid.UUID, error) {
+func (s *Store) Enqueue(ctx context.Context, executor Executor, preparedJobs ...*jobs.PreparedJob) ([]uuid.UUID, error) {
 	headers := map[string]string{}
 	for _, propagator := range s.propagators {
 		if err := propagator.Inject(ctx, headers); err != nil {
 			return nil, fmt.Errorf("enqueue: carry the context into the job headers: %w", err)
 		}
 	}
-	payloads, err := encodePayloads(newJobs)
+	payloads, err := encodePayloads(preparedJobs)
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]uuid.UUID, 0, len(newJobs))
-	for index, job := range newJobs {
+	ids := make([]uuid.UUID, 0, len(preparedJobs))
+	for index, job := range preparedJobs {
 		id, err := insert(ctx, executor, job, payloads[index], headers)
 		if err != nil {
 			return ids, err
@@ -95,9 +95,9 @@ func (s *Store) Enqueue(ctx context.Context, executor Executor, newJobs ...*jobs
 	return ids, nil
 }
 
-func encodePayloads(newJobs []*jobs.NewJob) ([]json.RawMessage, error) {
-	payloads := make([]json.RawMessage, len(newJobs))
-	for index, job := range newJobs {
+func encodePayloads(preparedJobs []*jobs.PreparedJob) ([]json.RawMessage, error) {
+	payloads := make([]json.RawMessage, len(preparedJobs))
+	for index, job := range preparedJobs {
 		payload, err := job.EncodePayload()
 		if err != nil {
 			return nil, err
@@ -107,7 +107,7 @@ func encodePayloads(newJobs []*jobs.NewJob) ([]json.RawMessage, error) {
 	return payloads, nil
 }
 
-func insert(ctx context.Context, executor Executor, job *jobs.NewJob, payload json.RawMessage, headers map[string]string) (uuid.UUID, error) {
+func insert(ctx context.Context, executor Executor, job *jobs.PreparedJob, payload json.RawMessage, headers map[string]string) (uuid.UUID, error) {
 	var runAt *time.Time
 	if !job.RunAt().IsZero() {
 		runAt = new(job.RunAt())

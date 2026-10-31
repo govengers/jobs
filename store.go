@@ -6,7 +6,8 @@ import (
 )
 
 // Store persists jobs for the Worker; postgresadapter.Store implements it. Every write after
-// a claim is fenced by the claim's Lease. All times are the database's.
+// a claim is fenced by the claim's Lease. All times are the database's. The interface may gain
+// methods in minor versions, so an implementation outside this module should expect that.
 type Store interface {
 	// Claim leases up to request.Limit runnable jobs of request.Queue, oldest run time first.
 	// Claiming releases a job's unique key.

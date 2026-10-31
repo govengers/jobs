@@ -13,7 +13,7 @@ type Schedule struct {
 	// depend on the replica, so every replica agrees on the periods. A Next that returns a time
 	// not after now fails the schedule's transaction instead of enqueueing again and again.
 	Next func(now time.Time) time.Time
-	Job  *NewJob // enqueued at the start of every period
+	Job  *PreparedJob // enqueued at the start of every period
 }
 
 // daysToSearch bounds DailyAt's search; the next occurrence is at most two calendar days away.

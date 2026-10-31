@@ -60,8 +60,8 @@ func (k *Kind[P]) Queue() string { return k.queue }
 
 // New prepares a job of this kind for the store's Enqueue. A nil options value enqueues it to
 // run now without a unique key.
-func (k *Kind[P]) New(payload P, options *EnqueueOptions) *NewJob {
-	job := &NewJob{kind: k.name, queue: k.queue, maximumAttempts: k.maximumAttempts, payload: payload}
+func (k *Kind[P]) New(payload P, options *EnqueueOptions) *PreparedJob {
+	job := &PreparedJob{kind: k.name, queue: k.queue, maximumAttempts: k.maximumAttempts, payload: payload}
 	if options != nil {
 		job.runAt = options.RunAt
 		job.uniqueKey = options.UniqueKey
@@ -74,7 +74,7 @@ func (k *Kind[P]) validate() error {
 }
 
 // validateKind is the rule of J20 for a kind and for every job built from one, including a
-// zero NewJob.
+// zero PreparedJob.
 func validateKind(name, queue string, maximumAttempts int) error {
 	if name == "" || queue == "" || maximumAttempts < 1 {
 		return fmt.Errorf("%w: name %q, queue %q, maximum attempts %d", ErrInvalidKind, name, queue, maximumAttempts)
@@ -91,8 +91,8 @@ type EnqueueOptions struct {
 	UniqueKey string
 }
 
-// NewJob is a job prepared by Kind.New, ready for the store's Enqueue.
-type NewJob struct {
+// PreparedJob is a job prepared by Kind.New, ready for the store's Enqueue.
+type PreparedJob struct {
 	kind            string
 	queue           string
 	maximumAttempts int
@@ -103,24 +103,24 @@ type NewJob struct {
 }
 
 // Kind is the name of the job's kind.
-func (j *NewJob) Kind() string { return j.kind }
+func (j *PreparedJob) Kind() string { return j.kind }
 
 // Queue is the queue the job is enqueued on.
-func (j *NewJob) Queue() string { return j.queue }
+func (j *PreparedJob) Queue() string { return j.queue }
 
 // MaximumAttempts is the number of attempts before the job is dead.
-func (j *NewJob) MaximumAttempts() int { return j.maximumAttempts }
+func (j *PreparedJob) MaximumAttempts() int { return j.maximumAttempts }
 
 // RunAt is the earliest time the job may be claimed; zero means now.
-func (j *NewJob) RunAt() time.Time { return j.runAt }
+func (j *PreparedJob) RunAt() time.Time { return j.runAt }
 
 // UniqueKey is the job's unique key; empty means none.
-func (j *NewJob) UniqueKey() string { return j.uniqueKey }
+func (j *PreparedJob) UniqueKey() string { return j.uniqueKey }
 
 // EncodePayload returns the payload as JSON. It fails with ErrInvalidKind when the job's kind
-// is invalid (also for a zero NewJob), and with the encoding error when the payload cannot be
+// is invalid (also for a zero PreparedJob), and with the encoding error when the payload cannot be
 // encoded.
-func (j *NewJob) EncodePayload() (json.RawMessage, error) {
+func (j *PreparedJob) EncodePayload() (json.RawMessage, error) {
 	if err := validateKind(j.kind, j.queue, j.maximumAttempts); err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (j *NewJob) EncodePayload() (json.RawMessage, error) {
 
 // snapshot returns a copy of the job with its payload encoded now, so a job a worker keeps (a
 // schedule's) does not follow later changes of the caller's payload value.
-func (j *NewJob) snapshot() (*NewJob, error) {
+func (j *PreparedJob) snapshot() (*PreparedJob, error) {
 	encoded, err := j.EncodePayload()
 	if err != nil {
 		return nil, err

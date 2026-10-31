@@ -6,7 +6,9 @@ import (
 )
 
 // Observer receives what the worker would otherwise have to log (LIB-003). The worker calls
-// it from several goroutines; implementations must be safe for concurrent use and fast.
+// it from several goroutines; implementations must be safe for concurrent use and fast. The
+// interface may gain methods in minor versions, so an implementation outside this module should
+// expect that.
 type Observer interface {
 	// AttemptFinished reports how one attempt ended.
 	AttemptFinished(outcome *Outcome)
