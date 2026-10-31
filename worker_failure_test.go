@@ -412,7 +412,10 @@ func TestASingleFailedExtensionCancelsNothing(t *testing.T) {
 		}
 		return harness.store.ExtendLeases(ctx, leases, duration)
 	}}
-	worker := harness.worker(&jobs.WorkerOptions{Store: store})
+	// A lease of 1.5 s, extended every 500 ms: one failed extension leaves the lease confirmed for
+	// another two intervals, so a slow runner's late heartbeat cannot let the 20 ms rescuer take
+	// the job (with the test's default 300 ms lease it did, a real expiry, not the regression).
+	worker := harness.worker(&jobs.WorkerOptions{Store: store, Queues: map[string]jobs.QueueOptions{"mail": {LeaseDuration: 1500 * time.Millisecond, PollInterval: pollEvery}}})
 	release := make(chan struct{})
 	causes := make(chan error, 1)
 	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
