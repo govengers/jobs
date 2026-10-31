@@ -10,9 +10,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"github.com/govengers/jobs"
 	"github.com/govengers/jobs/internal/postgrestest"
 	"github.com/govengers/jobs/postgresadapter"
+	"github.com/govengers/jobs/test/e2e/internal/contract"
 )
 
 func TestMain(m *testing.M) { postgrestest.Main(m) }
@@ -34,13 +37,6 @@ const (
 	waitFor   = 30 * time.Second
 	pollEvery = 50 * time.Millisecond
 )
-
-type taskPayload struct {
-	Block bool `json:"block"`
-}
-
-// taskKind matches the worker binary's e2e.task.
-var taskKind = jobs.NewKind[taskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaximumAttempts: 5})
 
 type database struct {
 	pool  *pgxpool.Pool
@@ -58,9 +54,9 @@ func newDatabase(t *testing.T) *database {
 	return &database{pool: pool, store: store}
 }
 
-func (d *database) enqueue(t *testing.T, payload taskPayload) uuid.UUID {
+func (d *database) enqueue(t *testing.T, payload contract.TaskPayload) uuid.UUID {
 	t.Helper()
-	ids, err := d.store.Enqueue(t.Context(), d.pool, taskKind.New(payload, nil))
+	ids, err := d.store.Enqueue(t.Context(), d.pool, contract.TaskKind.New(payload, nil))
 	require.NoError(t, err)
 	return ids[0]
 }
@@ -107,8 +103,12 @@ func (d *database) awaitStatus(t *testing.T, id uuid.UUID, status jobs.Status) *
 type process struct {
 	name    string
 	command *exec.Cmd
-	output  *lockedBuffer
-	exited  chan error
+	output  *lockedBuffer // stdout after the ready line, and stderr
+	exited  chan struct{} // closed once Wait returned and exitError is set
+	// exitError is Wait's result, written before exited is closed.
+	exitError error
+	killed    bool // the test killed it on purpose: its exit status is no finding
+	checked   bool // a harness test inspected its problems itself
 }
 
 type lockedBuffer struct {
@@ -128,44 +128,47 @@ func (b *lockedBuffer) String() string {
 	return b.buffer.String()
 }
 
-// timing is the worker's E2E_* durations.
-type timing struct {
+// settings are the worker's E2E_* variables.
+type settings struct {
 	lease, drainTimeout, scheduleEvery string
+	extra                              []string // more NAME=value pairs, for the harness tests
 }
 
-var defaultTiming = timing{lease: "1s", drainTimeout: "20s", scheduleEvery: "1h"}
+var defaultSettings = settings{lease: "1s", drainTimeout: "20s", scheduleEvery: "1h"}
 
-// startWorker starts the worker binary and waits until it is ready. The test's cleanup kills it
-// if it still runs and logs its output when the test failed.
-func startWorker(t *testing.T, database *database, name string, durations timing) *process {
+// startWorker starts the worker binary and waits until it is ready. The test's cleanup stops
+// every worker the test did not kill with SIGTERM and fails the test when one did not exit
+// cleanly or reported a race or a panic (TST-004, TST-011).
+func startWorker(t *testing.T, database *database, name string, worker settings) *process {
 	t.Helper()
 	binary := os.Getenv("E2E_WORKER")
 	if binary == "" {
 		t.Fatal("E2E_WORKER is not set; run the suite with just test-e2e")
 	}
-	command := exec.CommandContext(t.Context(), binary) //nolint:gosec // G702: the suite runs the worker binary just e2e-build built
-	command.Env = append(os.Environ(),
+	// Never cancelled: the cleanup stops the process itself, gracefully.
+	command := exec.CommandContext(context.WithoutCancel(t.Context()), binary) //nolint:gosec // G702: the suite runs the worker binary just e2e-build built
+	command.Env = append(append(os.Environ(),
 		"DATABASE_URL="+database.pool.Config().ConnString(),
 		"E2E_WORKER_NAME="+name,
-		"E2E_LEASE="+durations.lease,
-		"E2E_DRAIN_TIMEOUT="+durations.drainTimeout,
-		"E2E_SCHEDULE_EVERY="+durations.scheduleEvery,
-	)
+		"E2E_LEASE="+worker.lease,
+		"E2E_DRAIN_TIMEOUT="+worker.drainTimeout,
+		"E2E_SCHEDULE_EVERY="+worker.scheduleEvery,
+	), worker.extra...)
 	output := &lockedBuffer{}
 	command.Stderr = output
 	stdout, err := command.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, command.Start())
-	worker := &process{name: name, command: command, output: output, exited: make(chan error, 1)}
+	started := &process{name: name, command: command, output: output, exited: make(chan struct{})}
 	ready := make(chan struct{})
-	go worker.forwardOutput(stdout, ready)
-	t.Cleanup(func() { worker.stop(t) })
+	go started.forwardOutput(stdout, ready)
+	t.Cleanup(func() { started.finish(t) })
 	select {
 	case <-ready:
 	case <-time.After(waitFor):
 		t.Fatalf("worker %s did not start:\n%s", name, output)
 	}
-	return worker
+	return started
 }
 
 // forwardOutput signals the ready line, copies the rest of stdout and reports the exit.
@@ -178,46 +181,97 @@ func (p *process) forwardOutput(stdout io.Reader, ready chan<- struct{}) {
 		}
 		_, _ = p.output.Write(append(scanner.Bytes(), '\n')) // a lockedBuffer write never fails
 	}
-	p.exited <- p.command.Wait()
+	p.exitError = p.command.Wait()
+	close(p.exited)
+}
+
+// kill ends the process with SIGKILL, on purpose.
+func (p *process) kill(t *testing.T) {
+	t.Helper()
+	p.killed = true
+	require.NoError(t, p.command.Process.Signal(syscall.SIGKILL))
+	require.Error(t, p.awaitExit(t), "killed, no drain, no release")
 }
 
 func (p *process) awaitExit(t *testing.T) error {
 	t.Helper()
 	select {
-	case err := <-p.exited:
-		p.exited <- err // keep it for stop
-		return err
+	case <-p.exited:
+		return p.exitError
 	case <-time.After(waitFor):
 		t.Fatalf("worker %s did not exit:\n%s", p.name, p.output)
 		return nil
 	}
 }
 
-func (p *process) stop(t *testing.T) {
+// problems stops a running process with SIGTERM and returns what is wrong with it: an exit
+// status other than 0 (unless the test killed it), a race report or a panic in its output.
+func (p *process) problems(t *testing.T) []string {
 	t.Helper()
-	var exitError error
 	select {
-	case exitError = <-p.exited:
+	case <-p.exited:
 	default:
-		_ = p.command.Process.Kill() // fails only when the process exited meanwhile
-		exitError = <-p.exited
+		if !p.killed {
+			_ = p.command.Process.Signal(syscall.SIGTERM) // fails only when it exited meanwhile
+		}
 	}
-	if t.Failed() {
-		t.Logf("worker %s exited with %v, output:\n%s", p.name, exitError, p.output)
+	var found []string
+	if err := p.awaitExit(t); err != nil && !p.killed {
+		found = append(found, fmt.Sprintf("worker %s exited with %v", p.name, err))
+	}
+	output := p.output.String()
+	for _, marker := range []string{"WARNING: DATA RACE", "panic:", "fatal error:"} {
+		if strings.Contains(output, marker) {
+			found = append(found, fmt.Sprintf("worker %s reported %q", p.name, marker))
+		}
+	}
+	return found
+}
+
+func (p *process) finish(t *testing.T) {
+	t.Helper()
+	if p.checked {
+		return
+	}
+	problems := p.problems(t)
+	for _, problem := range problems {
+		t.Error(problem)
+	}
+	if len(problems) > 0 || t.Failed() {
+		t.Logf("worker %s output:\n%s", p.name, p.output)
+	}
+}
+
+// The harness must notice a worker that crashes or reports a race, otherwise a broken worker
+// leaves the suite green.
+func TestTheHarnessReportsABrokenWorker(t *testing.T) {
+	database := newDatabase(t)
+	for name, extra := range map[string][]string{
+		"non-zero exit": {"E2E_EXIT_AFTER_READY=1"},
+		"race report":   {"E2E_REPORT_ON_STDERR=WARNING: DATA RACE"},
+		"panic":         {"E2E_REPORT_ON_STDERR=panic: something broke"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			broken := startWorker(t, database, "broken", settings{lease: "1s", drainTimeout: "1s", scheduleEvery: "1h", extra: extra})
+
+			problems := broken.problems(t)
+			broken.checked = true
+
+			require.NotEmpty(t, problems)
+		})
 	}
 }
 
 func TestAJobOfAKilledProcessIsRecoveredByTheOther(t *testing.T) {
 	database := newDatabase(t)
 	workers := map[string]*process{
-		"first":  startWorker(t, database, "first", defaultTiming),
-		"second": startWorker(t, database, "second", defaultTiming),
+		"first":  startWorker(t, database, "first", defaultSettings),
+		"second": startWorker(t, database, "second", defaultSettings),
 	}
-	id := database.enqueue(t, taskPayload{Block: true})
+	id := database.enqueue(t, contract.TaskPayload{Block: true})
 	victim := workers[database.awaitRuns(t, id, 1)[0].worker]
 
-	require.NoError(t, victim.command.Process.Signal(syscall.SIGKILL))
-	require.Error(t, victim.awaitExit(t), "killed, no drain, no release")
+	victim.kill(t)
 
 	record := database.awaitStatus(t, id, jobs.StatusCompleted)
 	runs := database.runs(t, id)
@@ -228,8 +282,8 @@ func TestAJobOfAKilledProcessIsRecoveredByTheOther(t *testing.T) {
 
 func TestSigtermDrainsThenReleasesTheJob(t *testing.T) {
 	database := newDatabase(t)
-	draining := startWorker(t, database, "draining", timing{lease: "1s", drainTimeout: "300ms", scheduleEvery: "1h"})
-	id := database.enqueue(t, taskPayload{Block: true})
+	draining := startWorker(t, database, "draining", settings{lease: "1s", drainTimeout: "300ms", scheduleEvery: "1h"})
+	id := database.enqueue(t, contract.TaskPayload{Block: true})
 	database.awaitRuns(t, id, 1)
 
 	require.NoError(t, draining.command.Process.Signal(syscall.SIGTERM))
@@ -240,7 +294,7 @@ func TestSigtermDrainsThenReleasesTheJob(t *testing.T) {
 	require.Equal(t, 0, released.Attempt, "a released attempt does not count")
 	require.Empty(t, released.Worker)
 
-	startWorker(t, database, "next", defaultTiming)
+	startWorker(t, database, "next", defaultSettings)
 	record := database.awaitStatus(t, id, jobs.StatusCompleted)
 	require.Equal(t, 1, record.Attempt)
 	require.Equal(t, []run{{worker: "draining", attempt: 1}, {worker: "next", attempt: 1}}, database.runs(t, id))
@@ -248,23 +302,27 @@ func TestSigtermDrainsThenReleasesTheJob(t *testing.T) {
 
 func TestScheduleIsEnqueuedOncePerPeriodAcrossProcesses(t *testing.T) {
 	database := newDatabase(t)
-	scheduled := timing{lease: "1s", drainTimeout: "1s", scheduleEvery: "1s"}
+	scheduled := settings{lease: "1s", drainTimeout: "1s", scheduleEvery: "1s"}
 	startWorker(t, database, "first", scheduled)
 	startWorker(t, database, "second", scheduled)
 	const periods = 4
 
-	ticks := func() []time.Time {
-		rows, err := database.pool.Query(context.Background(), "SELECT created_at FROM govengers_jobs WHERE kind = 'e2e.tick' AND status = 'completed' ORDER BY created_at")
+	enqueuedAt := func() []time.Time {
+		rows, err := database.pool.Query(context.Background(), "SELECT created_at FROM govengers_jobs WHERE kind = $1 AND status = 'completed' ORDER BY created_at", contract.TickKind.Name())
 		require.NoError(t, err)
 		created, err := pgx.CollectRows(rows, pgx.RowTo[time.Time])
 		require.NoError(t, err)
 		return created
 	}
-	require.Eventually(t, func() bool { return len(ticks()) >= periods }, waitFor, pollEvery)
+	require.Eventually(t, func() bool { return len(enqueuedAt()) >= periods }, waitFor, pollEvery)
 
-	created := ticks()
-	for index := 1; index < len(created); index++ {
-		gap := created[index].Sub(created[index-1])
-		require.Greater(t, gap, 500*time.Millisecond, "two jobs in one period: tick %d came %s after the previous", index, gap)
+	// created_at is the now() of the transaction that enqueued and advanced the schedule, so two
+	// enqueues of one period fall into the same Every(1s) bucket.
+	perPeriod := map[time.Time]int{}
+	for _, created := range enqueuedAt() {
+		perPeriod[created.Truncate(time.Second)]++
+	}
+	for period, count := range perPeriod {
+		require.Equal(t, 1, count, "%d jobs in the period starting %s", count, period)
 	}
 }

@@ -413,31 +413,31 @@ func TestShutdownDrainsThenReleasesTheJob(t *testing.T) {
 	require.Equal(t, []jobs.Result{jobs.ResultReleased}, harness.observer.results())
 }
 
+// Finding 27: the cancel of Run's context provably happens while the handler blocks, and the
+// handler's context stays live through the drain.
 func TestShutdownLetsARunningHandlerFinish(t *testing.T) {
 	harness := newHarness(t)
 	kind := mailKind(nil)
 	worker := harness.worker(&jobs.WorkerOptions{DrainTimeout: waitFor})
-	started, proceed := make(chan struct{}, 1), make(chan struct{})
-	var cancelledEarly atomic.Bool
+	started, proceed := make(chan struct{}), make(chan struct{})
+	handlerContextLive := make(chan bool, 1)
 	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
-		started <- struct{}{}
+		close(started)
 		<-proceed
-		cancelledEarly.Store(ctx.Err() != nil)
+		handlerContextLive <- ctx.Err() == nil
 		return nil
 	}))
 	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
-	stop := harness.run(worker)
+	runContext, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() { returned <- worker.Run(runContext) }()
 	<-started
 
-	stopped := make(chan struct{})
-	go func() {
-		stop()
-		close(stopped)
-	}()
+	cancel() // returns after runContext is cancelled, while the handler still blocks
 	close(proceed)
-	<-stopped
 
-	require.False(t, cancelledEarly.Load(), "shutdown must not cancel a handler within the drain timeout")
+	require.True(t, <-handlerContextLive, "shutdown must not cancel a handler within the drain timeout")
+	require.NoError(t, <-returned)
 	require.Equal(t, jobs.StatusCompleted, harness.record(id).Status)
 }
 

@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -20,16 +21,7 @@ import (
 
 	"github.com/govengers/jobs"
 	"github.com/govengers/jobs/postgresadapter"
-)
-
-// TaskPayload is the payload of e2e.task.
-type TaskPayload struct {
-	Block bool `json:"block"` // block the first run until the attempt's context ends
-}
-
-var (
-	taskKind = jobs.NewKind[TaskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaximumAttempts: 5})
-	tickKind = jobs.NewKind[struct{}]("e2e.tick", &jobs.KindOptions{Queue: "e2e"})
+	"github.com/govengers/jobs/test/e2e/internal/contract"
 )
 
 func main() {
@@ -56,6 +48,12 @@ func run() error {
 		return err
 	}
 	fmt.Println("ready") // the suite waits for this line
+	if report := os.Getenv("E2E_REPORT_ON_STDERR"); report != "" {
+		fmt.Fprintln(os.Stderr, report) // lets the harness test prove it reads the output
+	}
+	if os.Getenv("E2E_EXIT_AFTER_READY") != "" {
+		return errors.New("exiting on request of the harness test")
+	}
 	return worker.Run(ctx)
 }
 
@@ -86,14 +84,14 @@ func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker,
 	worker, err := jobs.NewWorker(&jobs.WorkerOptions{
 		Store:            store,
 		Name:             name,
-		Queues:           map[string]jobs.QueueOptions{"e2e": {Concurrency: 4, Lease: durations.lease, PollInterval: 50 * time.Millisecond}},
+		Queues:           map[string]jobs.QueueOptions{contract.Queue: {Concurrency: 4, Lease: durations.lease, PollInterval: 50 * time.Millisecond}},
 		DrainTimeout:     durations.drainTimeout,
 		RescueInterval:   200 * time.Millisecond,
 		ScheduleInterval: 100 * time.Millisecond,
 		Schedules: []jobs.Schedule{{
 			Name: "e2e.tick",
 			Next: jobs.Every(durations.scheduleEvery),
-			Job:  tickKind.New(struct{}{}, nil),
+			Job:  contract.TickKind.New(struct{}{}, nil),
 		}},
 	})
 	if err != nil {
@@ -105,7 +103,7 @@ func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker,
             SELECT count(*) + 1 FROM e2e_runs WHERE job_id = $1`, id.String(), name, attempt).Scan(&runs)
 		return runs, err
 	}
-	err = jobs.Handle(worker, taskKind, func(ctx context.Context, job *jobs.Job[TaskPayload]) error {
+	err = jobs.Handle(worker, contract.TaskKind, func(ctx context.Context, job *jobs.Job[contract.TaskPayload]) error {
 		runs, err := record(context.WithoutCancel(ctx), job.ID, job.Attempt)
 		if err != nil || !job.Payload.Block || runs > 1 {
 			return err
@@ -116,7 +114,7 @@ func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker,
 	if err != nil {
 		return nil, err
 	}
-	return worker, jobs.Handle(worker, tickKind, func(ctx context.Context, job *jobs.Job[struct{}]) error {
+	return worker, jobs.Handle(worker, contract.TickKind, func(ctx context.Context, job *jobs.Job[struct{}]) error {
 		_, err := record(ctx, job.ID, job.Attempt)
 		return err
 	})

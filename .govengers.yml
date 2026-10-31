@@ -1,2 +1,4 @@
 profile: library
-exceptions: []
+exceptions:
+  - rule: DES-003
+    reason: internal/postgrestest keeps the one embedded PostgreSQL of a test binary in a package variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers away from. Test code only; the library has no mutable package state.
