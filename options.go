@@ -1,0 +1,90 @@
+package jobs
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// minimumLease keeps the heartbeat interval (Lease/3) meaningful.
+const minimumLease = 30 * time.Millisecond
+
+func queuesWithDefaults(queues map[string]QueueOptions) (map[string]QueueOptions, error) {
+	withDefaults := make(map[string]QueueOptions, len(queues))
+	for name, options := range queues {
+		if name == "" {
+			return nil, errors.New("jobs: a queue needs a name")
+		}
+		if options.Concurrency < 0 || options.Lease < 0 || options.PollInterval < 0 {
+			return nil, fmt.Errorf("jobs: queue %s: negative concurrency, lease or poll interval", name)
+		}
+		options.Concurrency = orDefault(options.Concurrency, DefaultConcurrency)
+		options.Lease = orDefault(options.Lease, DefaultLease)
+		options.PollInterval = orDefault(options.PollInterval, DefaultPollInterval)
+		if options.Lease < minimumLease {
+			return nil, fmt.Errorf("jobs: queue %s: lease %s is shorter than %s", name, options.Lease, minimumLease)
+		}
+		withDefaults[name] = options
+	}
+	return withDefaults, nil
+}
+
+// timing holds the intervals, timeouts and retentions of a worker after defaults.
+type timing struct {
+	drainTimeout     time.Duration
+	rescueInterval   time.Duration
+	sweepInterval    time.Duration
+	scheduleInterval time.Duration
+	retainCompleted  time.Duration
+	retainDead       time.Duration
+}
+
+func timingWithDefaults(options *WorkerOptions) (timing, error) {
+	durations := timing{
+		drainTimeout:     orDefault(options.DrainTimeout, DefaultDrainTimeout),
+		rescueInterval:   orDefault(options.RescueInterval, DefaultRescueInterval),
+		sweepInterval:    orDefault(options.SweepInterval, DefaultSweepInterval),
+		scheduleInterval: orDefault(options.ScheduleInterval, DefaultScheduleInterval),
+		retainCompleted:  orDefault(options.RetainCompleted, DefaultRetainCompleted),
+		retainDead:       orDefault(options.RetainDead, DefaultRetainDead),
+	}
+	for _, duration := range []time.Duration{
+		durations.drainTimeout, durations.rescueInterval, durations.sweepInterval,
+		durations.scheduleInterval, durations.retainCompleted, durations.retainDead,
+	} {
+		if duration < 0 {
+			return timing{}, errors.New("jobs: negative durations in WorkerOptions")
+		}
+	}
+	return durations, nil
+}
+
+func validateSchedules(schedules []*Schedule) error {
+	names := make(map[string]bool, len(schedules))
+	now := time.Now()
+	for _, schedule := range schedules {
+		if schedule == nil || schedule.Name == "" || schedule.Next == nil || schedule.Job == nil {
+			return errors.New("jobs: a schedule needs a name, a Next function and a job")
+		}
+		if names[schedule.Name] {
+			return fmt.Errorf("jobs: schedule %s is declared twice", schedule.Name)
+		}
+		names[schedule.Name] = true
+		if !schedule.Next(now).After(now) {
+			return fmt.Errorf("jobs: schedule %s: Next must return a time after now", schedule.Name)
+		}
+		if _, err := schedule.Job.EncodePayload(); err != nil {
+			return fmt.Errorf("jobs: schedule %s: %w", schedule.Name, err)
+		}
+	}
+	return nil
+}
+
+// orDefault returns fallback for a zero value.
+func orDefault[T comparable](value, fallback T) T {
+	var zero T
+	if value == zero {
+		return fallback
+	}
+	return value
+}

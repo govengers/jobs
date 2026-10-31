@@ -67,6 +67,8 @@ Rejected: a shared "bus" database all services connect to (couples every service
 | J20 | (WP1) `NewKind` does not validate, so a kind can initialize a package-level variable; `Handle` and `Enqueue` return `jobs.ErrInvalidKind` for an empty name, an empty queue or a negative `MaxAttempts`. |
 | J21 | (WP2) Propagators are configured twice from the same slice in `main`: `postgresadapter.StoreOptions.Propagators` inject at enqueue, `jobs.WorkerOptions.Propagators` extract before the handler. |
 | J22 | (WP2) `MigrationV1` is a Go constant that starts with `SET LOCAL lock_timeout` and `statement_timeout` and passes squawk 2.66 for Postgres 18; the attempt counters stay `integer` with line-level `squawk-ignore prefer-bigint-over-int`. The admin types (`Record`, `ListFilter`) and their errors (`ErrNotFound`, `ErrFinished`, `ErrNotDead`) live in `postgresadapter`, not in the core. |
+| J23 | (WP3) Store operations of the worker (claim, heartbeat, finish, rescue, sweep, schedules) run on a context detached from shutdown with a 10 s timeout, so a cancel during a claim never strands claimed rows. A failed finish write is reported to the Observer and the job stays running until the rescuer returns it. A handler that returns nil after its cancellation was requested completes. The minimum lease is 30 ms. |
+| J24 | (WP3) Results reported to the Observer add `fenced` (the store refused the finish because the lease had expired before the heartbeat noticed) to J8's outcomes and `lease_lost`; result and operation names are snake_case so they work as metric labels. |
 
 ## 3. Decisions: events
 
