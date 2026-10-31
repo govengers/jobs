@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/jobs"
@@ -21,6 +22,14 @@ type faultyStore struct {
 	claim        func(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error)
 	extendLeases func(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error)
 	finish       func(ctx context.Context, finish *jobs.Finish) (jobs.Status, error)
+	schedule     func(ctx context.Context, schedule jobs.Schedule) (bool, error)
+}
+
+func (s *faultyStore) EnqueueDueSchedule(ctx context.Context, schedule jobs.Schedule) (bool, error) {
+	if s.schedule != nil {
+		return s.schedule(ctx, schedule)
+	}
+	return s.Store.EnqueueDueSchedule(ctx, schedule)
 }
 
 func (s *faultyStore) Claim(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error) {
@@ -597,4 +606,75 @@ func TestNewWorkerEncodesAScheduledPayloadOnce(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, int32(1), encodings.Load())
+}
+
+// Round 4, finding 1: a panic of the store on the schedule path ends Run with the error (J35);
+// only a panicking Next is the schedule's own error (TestAPanickingNextFailsOnlyItsSchedule).
+func TestAPanickingStoreOnTheSchedulePathEndsRun(t *testing.T) {
+	harness := newHarness(t)
+	store := &faultyStore{Store: harness.store, schedule: func(context.Context, jobs.Schedule) (bool, error) {
+		panic("store bug")
+	}}
+	worker := harness.worker(&jobs.WorkerOptions{Store: store, Schedules: []jobs.Schedule{{Name: "digest", Next: jobs.Every(time.Hour), Job: mailKind(nil).New(mailPayload{}, nil)}}})
+	returned := make(chan error, 1)
+
+	go func() { returned <- worker.Run(context.Background()) }()
+
+	select {
+	case err := <-returned:
+		require.ErrorContains(t, err, "panicked: store bug")
+	case <-time.After(waitFor):
+		t.Fatal("a panicking store kept Run alive")
+	}
+}
+
+// sequence records the order of observer calls and result reports for one test.
+type sequence struct {
+	mutex  sync.Mutex
+	events []string
+}
+
+func (s *sequence) add(event string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.events = append(s.events, event)
+}
+
+func (s *sequence) recorded() []string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return append([]string(nil), s.events...)
+}
+
+type sequenceObserver struct{ sequence *sequence }
+
+func (o sequenceObserver) AttemptFinished(*jobs.Outcome) { o.sequence.add("attempt finished") }
+
+func (o sequenceObserver) OperationFinished(operation *jobs.Operation) {
+	if operation.Name == jobs.OperationFinish {
+		o.sequence.add("finish operation")
+	}
+}
+
+// Round 4, finding 2: OnResult's reports run in registration order, after the Observer's
+// OperationFinished for the finish write and before its AttemptFinished.
+func TestResultReportsRunInOrderBetweenTheFinishOperationAndAttemptFinished(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	order := &sequence{}
+	reporting := func(next jobs.Handler) jobs.Handler {
+		return func(ctx context.Context, claim *jobs.Claim) error {
+			assert.True(t, jobs.OnResult(ctx, func(jobs.Result, error) { order.add("first report") })) // the attempt's goroutine: assert, not require
+			assert.True(t, jobs.OnResult(ctx, func(jobs.Result, error) { order.add("second report") }))
+			return next(ctx, claim)
+		}
+	}
+	worker := harness.worker(&jobs.WorkerOptions{Observer: sequenceObserver{sequence: order}, Middleware: []jobs.Middleware{reporting}})
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+
+	harness.run(worker)
+
+	require.Eventually(t, func() bool { return len(order.recorded()) == 4 }, waitFor, pollEvery)
+	require.Equal(t, []string{"finish operation", "first report", "second report", "attempt finished"}, order.recorded())
 }

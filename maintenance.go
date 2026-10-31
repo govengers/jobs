@@ -3,8 +3,6 @@ package jobs
 import (
 	"context"
 	"time"
-
-	"github.com/govengers/jobs/internal/recovery"
 )
 
 // maintain rescues expired leases and sweeps old jobs until ctx is cancelled. Every worker
@@ -75,20 +73,16 @@ func (w *Worker) repeatBatches(ctx context.Context, name OperationName, batch in
 
 // enqueueSchedule checks one schedule under its own operation timeout. A scheduled job belongs
 // to no request: it is enqueued on a context without the values of Run's context, so the
-// propagators inject no identity or trace main put there. A panic of the schedule's Next fails
-// this check only. observe reports the error to the Observer; the next interval tries again.
+// propagators inject no identity or trace main put there. The store turns a panic of the
+// schedule's Next into this check's error; a panic of the store itself ends Run (J35). observe
+// reports the error to the Observer; the next interval tries again.
 func (w *Worker) enqueueSchedule(schedule Schedule) {
-	_, _ = w.observe(context.Background(), OperationSchedules, func(operationContext context.Context) (enqueued int, err error) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				enqueued, err = 0, recovery.Error("schedule "+schedule.Name, recovered)
-			}
-		}()
+	_, _ = w.observe(context.Background(), OperationSchedules, func(operationContext context.Context) (int, error) {
 		wasDue, err := w.store.EnqueueDueSchedule(operationContext, schedule)
 		if wasDue {
-			enqueued = 1
+			return 1, err
 		}
-		return enqueued, err
+		return 0, err
 	})
 }
 
