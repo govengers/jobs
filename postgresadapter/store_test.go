@@ -1,0 +1,381 @@
+package postgresadapter_test
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/govengers/jobs"
+	"github.com/govengers/jobs/internal/postgrestest"
+	"github.com/govengers/jobs/postgresadapter"
+)
+
+func TestMain(m *testing.M) { postgrestest.Main(m) }
+
+type mailPayload struct {
+	Recipient string `json:"recipient"`
+}
+
+var mailKind = jobs.NewKind[mailPayload]("mail.send", &jobs.KindOptions{Queue: "mail", MaxAttempts: 3})
+
+const lease = time.Minute
+
+func newStore(t *testing.T) (*postgresadapter.Store, *pgxpool.Pool) {
+	t.Helper()
+	pool := postgrestest.New(t)
+	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	require.NoError(t, err)
+	return store, pool
+}
+
+func enqueue(t *testing.T, store *postgresadapter.Store, pool *pgxpool.Pool, options *jobs.EnqueueOptions) uuid.UUID {
+	t.Helper()
+	ids, err := store.Enqueue(context.Background(), pool, mailKind.New(mailPayload{Recipient: "ada@example.com"}, options))
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	return ids[0]
+}
+
+func claimOne(t *testing.T, store *postgresadapter.Store, duration time.Duration) *jobs.Claim {
+	t.Helper()
+	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 1, Lease: duration, Worker: "test"})
+	require.NoError(t, err)
+	require.Len(t, claims, 1)
+	return claims[0]
+}
+
+func get(t *testing.T, store *postgresadapter.Store, id uuid.UUID) *postgresadapter.Record {
+	t.Helper()
+	record, err := store.Get(context.Background(), id)
+	require.NoError(t, err)
+	return record
+}
+
+func TestNewStoreRequiresPool(t *testing.T) {
+	_, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{})
+	require.Error(t, err)
+	_, err = postgresadapter.NewStore(nil)
+	require.Error(t, err)
+}
+
+func TestEnqueueAndClaim(t *testing.T) {
+	store, pool := newStore(t)
+	id := enqueue(t, store, pool, &jobs.EnqueueOptions{UniqueKey: "ada"})
+
+	claim := claimOne(t, store, lease)
+
+	require.Equal(t, id, claim.Lease.JobID)
+	require.NotEqual(t, uuid.Nil, claim.Lease.Token)
+	require.Equal(t, "mail.send", claim.Kind)
+	require.Equal(t, 1, claim.Attempt)
+	require.Equal(t, 3, claim.MaxAttempts)
+	require.JSONEq(t, `{"recipient":"ada@example.com"}`, string(claim.Payload))
+	record := get(t, store, id)
+	require.Equal(t, jobs.StatusRunning, record.Status)
+	require.Equal(t, "test", record.Worker)
+	require.Empty(t, record.UniqueKey, "claiming releases the unique key (J19)")
+}
+
+func TestEnqueueRollsBackWithTheTransaction(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	transaction, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	ids, err := store.Enqueue(ctx, transaction, mailKind.New(mailPayload{}, nil))
+	require.NoError(t, err)
+
+	require.NoError(t, transaction.Rollback(ctx))
+
+	_, err = store.Get(ctx, ids[0])
+	require.ErrorIs(t, err, postgresadapter.ErrNotFound)
+}
+
+func TestEnqueueRejectsAnInvalidKind(t *testing.T) {
+	store, pool := newStore(t)
+	invalid := jobs.NewKind[mailPayload]("mail.send", nil)
+
+	_, err := store.Enqueue(context.Background(), pool, invalid.New(mailPayload{}, nil))
+
+	require.ErrorIs(t, err, jobs.ErrInvalidKind)
+}
+
+func TestEnqueueRunAtDelaysTheClaim(t *testing.T) {
+	store, pool := newStore(t)
+	enqueue(t, store, pool, &jobs.EnqueueOptions{RunAt: time.Now().Add(time.Hour)})
+
+	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 10, Lease: lease, Worker: "test"})
+
+	require.NoError(t, err)
+	require.Empty(t, claims)
+}
+
+func TestUniqueKeyCoalescesJobsThatHaveNotStarted(t *testing.T) {
+	store, pool := newStore(t)
+	first := enqueue(t, store, pool, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"})
+
+	second := enqueue(t, store, pool, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"})
+	require.Equal(t, first, second)
+
+	claimOne(t, store, lease)
+	third := enqueue(t, store, pool, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"})
+	require.NotEqual(t, first, third, "an enqueue during a run starts another run")
+}
+
+type tenantPropagator struct{}
+
+type tenantKey struct{}
+
+func (tenantPropagator) Inject(ctx context.Context, headers map[string]string) {
+	if tenant, ok := ctx.Value(tenantKey{}).(string); ok {
+		headers["tenant"] = tenant
+	}
+}
+
+func (tenantPropagator) Extract(ctx context.Context, headers map[string]string) context.Context {
+	return context.WithValue(ctx, tenantKey{}, headers["tenant"])
+}
+
+func TestEnqueueStoresPropagatedHeaders(t *testing.T) {
+	pool := postgrestest.New(t)
+	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool, Propagators: []jobs.Propagator{tenantPropagator{}}})
+	require.NoError(t, err)
+	ctx := context.WithValue(context.Background(), tenantKey{}, "tenant-7")
+
+	_, err = store.Enqueue(ctx, pool, mailKind.New(mailPayload{}, nil))
+	require.NoError(t, err)
+
+	require.Equal(t, map[string]string{"tenant": "tenant-7"}, claimOne(t, store, lease).Headers)
+}
+
+func TestConcurrentClaimsNeverShareAJob(t *testing.T) {
+	store, pool := newStore(t)
+	const jobCount = 60
+	for range jobCount {
+		enqueue(t, store, pool, nil)
+	}
+	var mutex sync.Mutex
+	claimed := map[uuid.UUID]int{}
+	group, ctx := errgroup.WithContext(context.Background())
+	for worker := range 4 {
+		group.Go(func() error {
+			for {
+				claims, err := store.Claim(ctx, &jobs.ClaimRequest{Queue: "mail", Limit: 3, Lease: lease, Worker: fmt.Sprintf("worker-%d", worker)})
+				if err != nil || len(claims) == 0 {
+					return err
+				}
+				mutex.Lock()
+				for _, claim := range claims {
+					claimed[claim.Lease.JobID]++
+				}
+				mutex.Unlock()
+			}
+		})
+	}
+
+	require.NoError(t, group.Wait())
+	require.Len(t, claimed, jobCount)
+	for id, count := range claimed {
+		require.Equal(t, 1, count, "job %s claimed twice", id)
+	}
+}
+
+func TestStaleFinishIsFencedAfterTheLeaseWasRescued(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	id := enqueue(t, store, pool, nil)
+	stale := claimOne(t, store, time.Microsecond)
+	rescued, err := store.Rescue(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, rescued)
+	current := claimOne(t, store, lease)
+
+	written, err := store.Finish(ctx, &jobs.Finish{Lease: stale.Lease, Status: jobs.StatusCompleted})
+	require.NoError(t, err)
+	require.False(t, written, "the stale worker must not overwrite the newer attempt")
+	require.Equal(t, jobs.StatusRunning, get(t, store, id).Status)
+
+	written, err = store.Finish(ctx, &jobs.Finish{Lease: current.Lease, Status: jobs.StatusCompleted})
+	require.NoError(t, err)
+	require.True(t, written)
+	record := get(t, store, id)
+	require.Equal(t, jobs.StatusCompleted, record.Status)
+	require.Equal(t, 2, record.Attempt, "the rescued attempt counts")
+	require.NotNil(t, record.FinishedAt)
+}
+
+func TestFinishRetryDelaysAndRecordsTheError(t *testing.T) {
+	store, pool := newStore(t)
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+	before := time.Now()
+
+	written, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Hour, Error: "upstream down"})
+
+	require.NoError(t, err)
+	require.True(t, written)
+	record := get(t, store, id)
+	require.Equal(t, jobs.StatusPending, record.Status)
+	require.Equal(t, 1, record.Attempt)
+	require.Equal(t, "upstream down", record.LastError)
+	require.WithinDuration(t, before.Add(time.Hour), record.RunAt, time.Minute)
+	require.Nil(t, record.FinishedAt)
+	require.Empty(t, record.Worker)
+}
+
+func TestFinishReturnAttemptDoesNotCount(t *testing.T) {
+	store, pool := newStore(t)
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+
+	_, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, ReturnAttempt: true})
+
+	require.NoError(t, err)
+	require.Equal(t, 0, get(t, store, id).Attempt)
+	require.Equal(t, 1, claimOne(t, store, lease).Attempt)
+}
+
+func TestFinishDead(t *testing.T) {
+	store, pool := newStore(t)
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+
+	_, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusDead, Error: "bad recipient"})
+
+	require.NoError(t, err)
+	record := get(t, store, id)
+	require.Equal(t, jobs.StatusDead, record.Status)
+	require.Equal(t, "bad recipient", record.LastError)
+	require.NotNil(t, record.FinishedAt)
+}
+
+func TestExtendLeases(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	enqueue(t, store, pool, nil)
+	held := claimOne(t, store, lease)
+	foreign := jobs.Lease{JobID: held.Lease.JobID, Token: uuid.New()}
+
+	leases, err := store.ExtendLeases(ctx, []jobs.Lease{held.Lease, foreign}, lease)
+	require.NoError(t, err)
+	require.Equal(t, []jobs.HeldLease{{JobID: held.Lease.JobID}}, leases)
+
+	require.NoError(t, store.Cancel(ctx, held.Lease.JobID))
+	leases, err = store.ExtendLeases(ctx, []jobs.Lease{held.Lease}, lease)
+	require.NoError(t, err)
+	require.Equal(t, []jobs.HeldLease{{JobID: held.Lease.JobID, CancelRequested: true}}, leases)
+
+	leases, err = store.ExtendLeases(ctx, nil, lease)
+	require.NoError(t, err)
+	require.Empty(t, leases)
+}
+
+func TestFinishPendingOfACancelledJobCancelsIt(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+	require.NoError(t, store.Cancel(ctx, id))
+
+	_, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Minute, ReturnAttempt: true})
+
+	require.NoError(t, err)
+	record := get(t, store, id)
+	require.Equal(t, jobs.StatusCancelled, record.Status)
+	require.NotNil(t, record.FinishedAt)
+}
+
+func TestRescue(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	retried := enqueue(t, store, pool, nil)
+	claimOne(t, store, time.Microsecond)
+	exhausted, err := store.Enqueue(ctx, pool, jobs.NewKind[mailPayload]("mail.once", &jobs.KindOptions{Queue: "mail", MaxAttempts: 1}).New(mailPayload{}, nil))
+	require.NoError(t, err)
+	claimOne(t, store, time.Microsecond)
+	cancelled := enqueue(t, store, pool, nil)
+	claimOne(t, store, time.Microsecond)
+	require.NoError(t, store.Cancel(ctx, cancelled))
+	healthy := enqueue(t, store, pool, nil)
+	claimOne(t, store, lease)
+
+	rescued, err := store.Rescue(ctx, 10)
+
+	require.NoError(t, err)
+	require.Equal(t, 3, rescued)
+	require.Equal(t, jobs.StatusPending, get(t, store, retried).Status)
+	require.Equal(t, 1, get(t, store, retried).Attempt)
+	require.Contains(t, get(t, store, retried).LastError, "lease expired")
+	require.Equal(t, jobs.StatusDead, get(t, store, exhausted[0]).Status)
+	require.Equal(t, jobs.StatusCancelled, get(t, store, cancelled).Status)
+	require.Equal(t, jobs.StatusRunning, get(t, store, healthy).Status)
+}
+
+func TestSweep(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	completed := enqueue(t, store, pool, nil)
+	finish(t, store, jobs.StatusCompleted)
+	dead := enqueue(t, store, pool, nil)
+	finish(t, store, jobs.StatusDead)
+	pending := enqueue(t, store, pool, nil)
+
+	deleted, err := store.Sweep(ctx, &jobs.SweepRequest{RetainCompleted: 0, RetainDead: time.Hour, Limit: 100})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	_, err = store.Get(ctx, completed)
+	require.ErrorIs(t, err, postgresadapter.ErrNotFound)
+	require.Equal(t, jobs.StatusDead, get(t, store, dead).Status)
+	require.Equal(t, jobs.StatusPending, get(t, store, pending).Status)
+}
+
+func finish(t *testing.T, store *postgresadapter.Store, status jobs.Status) {
+	t.Helper()
+	claim := claimOne(t, store, lease)
+	written, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: status})
+	require.NoError(t, err)
+	require.True(t, written)
+}
+
+func TestSchedulesEnqueueOncePerPeriodAcrossWorkers(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('nightly-report', now() - interval '1 minute')")
+	require.NoError(t, err)
+	schedule := &jobs.Schedule{
+		Name: "nightly-report",
+		Next: func(now time.Time) time.Time { return now.Add(time.Hour) },
+		Job:  mailKind.New(mailPayload{Recipient: "reports@example.com"}, nil),
+	}
+	registered := &jobs.Schedule{Name: "registered-later", Next: schedule.Next, Job: schedule.Job}
+	var total sync.Map
+	group, groupContext := errgroup.WithContext(ctx)
+	for worker := range 8 {
+		group.Go(func() error {
+			count, err := store.EnqueueDueSchedules(groupContext, []*jobs.Schedule{schedule, registered})
+			total.Store(worker, count)
+			return err
+		})
+	}
+	require.NoError(t, group.Wait())
+
+	enqueued := 0
+	total.Range(func(_, count any) bool {
+		enqueued += count.(int)
+		return true
+	})
+	require.Equal(t, 1, enqueued)
+	records, err := store.List(ctx, &postgresadapter.ListFilter{Queue: "mail"})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	var dueAgain bool
+	require.NoError(t, pool.QueryRow(ctx, "SELECT bool_or(next_run_at <= now()) FROM govengers_job_schedules").Scan(&dueAgain))
+	require.False(t, dueAgain, "both schedules wait for their next period")
+}
