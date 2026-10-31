@@ -1,0 +1,12 @@
+# govengers/jobs
+
+> Durable PostgreSQL work queue for govengers services: enqueue inside the caller's transaction, typed kinds, lease and heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain.
+
+- Module: `github.com/govengers/jobs` (v1 in development), Go 1.26, PostgreSQL 18, Apache 2.0.
+- Packages: `jobs` (model, outcomes, worker, Store interface), `postgresadapter` (Store on pgx/v5, enqueue, admin operations, DDL).
+- Standards: govengers/standards, `library` profile.
+
+## Docs
+
+- [docs/design.md](docs/design.md): the binding design, decisions J1-J18 (jobs) and E1-E11 (events, separate module), schema, work packages.
+- [README.md](README.md): install and a minimal example.
