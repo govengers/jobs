@@ -2,3 +2,5 @@ profile: library
 exceptions:
   - rule: DES-003
     reason: internal/postgrestest keeps the one embedded PostgreSQL of a test binary in a package variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers away from. Test code only; the library has no mutable package state.
+  - rule: LIB-001
+    reason: jobs.Store and jobs.Observer announce in their doc comments that they may gain methods in minor versions (J51, MaPa 31.10.2026). Adding such a method breaks an implementation outside this module, which LIB-001 would count as a breaking minor; the documented policy makes it part of the v1 contract instead. Every other exported API follows LIB-001.
