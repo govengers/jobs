@@ -201,7 +201,11 @@ func registerSchedules(ctx context.Context, transaction pgx.Tx, schedules []jobs
 	byName := make(map[string]jobs.Schedule, len(schedules))
 	for _, schedule := range schedules {
 		byName[schedule.Name] = schedule
-		if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, schedule.Next(now)); err != nil {
+		next, err := nextRun(schedule, now)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, next); err != nil {
 			return nil, wrapDriverError(err, "register schedule %s", schedule.Name)
 		}
 	}
@@ -232,8 +236,22 @@ func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, sched
 	if _, err := s.Enqueue(ctx, transaction, schedule.Job); err != nil {
 		return fmt.Errorf("enqueue schedule %s: %w", schedule.Name, err)
 	}
-	if _, err := transaction.Exec(ctx, advanceSchedule, schedule.Name, schedule.Next(now)); err != nil {
+	next, err := nextRun(schedule, now)
+	if err != nil {
+		return err
+	}
+	if _, err := transaction.Exec(ctx, advanceSchedule, schedule.Name, next); err != nil {
 		return wrapDriverError(err, "advance schedule %s", schedule.Name)
 	}
 	return nil
+}
+
+// nextRun asks the schedule for its next period and refuses one that is not after now: stored,
+// it would leave the schedule due and enqueue on every poll.
+func nextRun(schedule jobs.Schedule, now time.Time) (time.Time, error) {
+	next := schedule.Next(now)
+	if !next.After(now) {
+		return time.Time{}, fmt.Errorf("schedule %s: Next(%s) returned %s, which is not after it", schedule.Name, now.Format(time.RFC3339Nano), next.Format(time.RFC3339Nano))
+	}
+	return next, nil
 }
