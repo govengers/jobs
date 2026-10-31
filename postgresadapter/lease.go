@@ -36,7 +36,7 @@ RETURNING job.id, job.lease_token, job.queue, job.kind, job.payload, job.headers
 
 // Claim implements jobs.Store.
 func (s *Store) Claim(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error) {
-	rows, err := s.pool.Query(ctx, claimJobs, request.Queue, request.Limit, request.Lease.Microseconds(), request.Worker)
+	rows, err := s.pool.Query(ctx, claimJobs, request.Queue, request.Limit, request.LeaseDuration.Microseconds(), request.Worker)
 	if err != nil {
 		return nil, wrapDriverError(err, "claim jobs of queue %s", request.Queue)
 	}

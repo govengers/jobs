@@ -37,7 +37,7 @@ func ExampleNewWorker() {
 	}
 	worker, err := jobs.NewWorker(&jobs.WorkerOptions{
 		Store:  jobStore,
-		Queues: map[string]jobs.QueueOptions{"generation": {Concurrency: 3, Lease: 30 * time.Second}},
+		Queues: map[string]jobs.QueueOptions{"generation": {Concurrency: 3, LeaseDuration: 30 * time.Second}},
 	})
 	if err != nil {
 		fmt.Println(err)

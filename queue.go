@@ -102,7 +102,7 @@ func (r *queueRunner) poll(ctx context.Context) {
 // claimAndStart claims up to the free slots and starts the claimed jobs. It reports whether it
 // filled every free slot.
 func (r *queueRunner) claimAndStart(ctx context.Context) bool {
-	free := cap(r.slots) - len(r.slots)
+	free := r.freeSlots()
 	if free == 0 {
 		return false
 	}
@@ -112,10 +112,15 @@ func (r *queueRunner) claimAndStart(ctx context.Context) bool {
 		return false
 	}
 	for _, claim := range claims {
-		r.slots <- struct{}{}
 		r.start(ctx, claim, claimStarted)
 	}
 	return len(claims) == free
+}
+
+// freeSlots is how many more jobs this runner may run now. Only the poll loop takes slots, so
+// the number cannot shrink before the claimed jobs start.
+func (r *queueRunner) freeSlots() int {
+	return cap(r.slots) - len(r.slots)
 }
 
 func (r *queueRunner) claim(ctx context.Context, limit int) ([]*Claim, error) {
@@ -123,7 +128,7 @@ func (r *queueRunner) claim(ctx context.Context, limit int) ([]*Claim, error) {
 	defer cancel()
 	started := time.Now()
 	claims, err := r.store.Claim(operationContext, &ClaimRequest{
-		Queue: r.queue, Limit: limit, Lease: r.options.Lease, Worker: r.workerName,
+		Queue: r.queue, Limit: limit, LeaseDuration: r.options.LeaseDuration, Worker: r.workerName,
 	})
 	r.observer.operationFinished(&Operation{
 		Name: OperationClaim, Queue: r.queue, Count: len(claims), Duration: time.Since(started), Err: err,
@@ -134,6 +139,7 @@ func (r *queueRunner) claim(ctx context.Context, limit int) ([]*Claim, error) {
 // start runs the claim's attempt on a context of its own: shutdown does not cancel it, only a
 // lost lease, a cancellation or the end of the drain does.
 func (r *queueRunner) start(ctx context.Context, claim *Claim, claimStarted time.Time) {
+	r.slots <- struct{}{} // never blocks: the claim asked for at most the free slots
 	attemptContext, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	r.mutex.Lock()
 	r.running[claim.Lease] = &runningJob{cancel: cancel, confirmedAt: claimStarted}
@@ -228,7 +234,7 @@ func (r *queueRunner) heartbeat(ctx context.Context) error {
 }
 
 func (r *queueRunner) heartbeatInterval() time.Duration {
-	return r.options.Lease / heartbeatsPerLease
+	return r.options.LeaseDuration / heartbeatsPerLease
 }
 
 func (r *queueRunner) extendLeases(ctx context.Context) {
@@ -240,7 +246,7 @@ func (r *queueRunner) extendLeases(ctx context.Context) {
 	operationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.heartbeatInterval())
 	defer cancel()
 	started := time.Now()
-	held, err := r.store.ExtendLeases(operationContext, leases, r.options.Lease)
+	held, err := r.store.ExtendLeases(operationContext, leases, r.options.LeaseDuration)
 	r.observer.operationFinished(&Operation{
 		Name: OperationExtendLeases, Queue: r.queue, Count: len(held), Duration: time.Since(started), Err: err,
 	})
@@ -296,7 +302,7 @@ func (r *queueRunner) cancelUnconfirmed(now time.Time) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	for _, job := range r.running {
-		if now.Sub(job.confirmedAt) > r.options.Lease {
+		if now.Sub(job.confirmedAt) > r.options.LeaseDuration {
 			job.cancel(ErrLeaseLost)
 		}
 	}

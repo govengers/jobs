@@ -23,7 +23,7 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 		"no store":            {},
 		"unnamed queue":       {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"": {}}},
 		"negative queue":      {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: -1}}},
-		"lease too short":     {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"mail": {Lease: time.Millisecond}}},
+		"lease too short":     {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"mail": {LeaseDuration: time.Millisecond}}},
 		"negative duration":   {Store: storeStub{}, DrainTimeout: -time.Second},
 		"schedule without fn": {Store: storeStub{}, Schedules: []jobs.Schedule{{Name: "digest", Job: kind.New(mailPayload{}, nil)}}},
 		"schedule twice":      {Store: storeStub{}, Schedules: []jobs.Schedule{validSchedule(), validSchedule()}},

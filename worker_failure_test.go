@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/jobs"
@@ -122,7 +123,7 @@ func TestAFailedFinishIsReportedAsFinishFailed(t *testing.T) {
 		failed.Store(true)
 		return "", writeError
 	}}
-	worker := harness.worker(&jobs.WorkerOptions{Store: store, Queues: map[string]jobs.QueueOptions{"mail": {Lease: time.Minute, PollInterval: pollEvery}}})
+	worker := harness.worker(&jobs.WorkerOptions{Store: store, Queues: map[string]jobs.QueueOptions{"mail": {LeaseDuration: time.Minute, PollInterval: pollEvery}}})
 	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
 	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
 
@@ -371,7 +372,7 @@ func TestAFencedFinishIsReportedAsFenced(t *testing.T) {
 func TestTheWorkerClaimsOnlyItsFreeSlots(t *testing.T) {
 	harness := newHarness(t)
 	kind := mailKind(nil)
-	worker := harness.worker(&jobs.WorkerOptions{Name: "two-slots", Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 2, Lease: testLease, PollInterval: pollEvery}}})
+	worker := harness.worker(&jobs.WorkerOptions{Name: "two-slots", Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 2, LeaseDuration: testLease, PollInterval: pollEvery}}})
 	var running atomic.Int32
 	release := make(chan struct{})
 	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
@@ -395,4 +396,130 @@ func TestTheWorkerClaimsOnlyItsFreeSlots(t *testing.T) {
 	require.NoError(t, harness.pool.QueryRow(context.Background(), "SELECT count(*) FROM govengers_jobs WHERE status = 'running' AND worker = 'two-slots'").Scan(&leased))
 	require.Equal(t, 2, leased)
 	close(release)
+}
+
+// Round 2, finding 2: a single failed extension cancels nothing while the lease was confirmed
+// less than a lease ago; the grace period is measured from the last confirmation.
+func TestASingleFailedExtensionCancelsNothing(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	var extensions atomic.Int32
+	failed := make(chan struct{})
+	store := &faultyStore{Store: harness.store, extendLeases: func(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error) {
+		if extensions.Add(1) == 4 { // one lease length of confirmed extensions at Lease/3, then one failure
+			close(failed)
+			return nil, errors.New("connection reset by peer")
+		}
+		return harness.store.ExtendLeases(ctx, leases, duration)
+	}}
+	worker := harness.worker(&jobs.WorkerOptions{Store: store})
+	release := make(chan struct{})
+	causes := make(chan error, 1)
+	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		causes <- context.Cause(ctx)
+		return nil
+	}))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+
+	harness.run(worker)
+	<-failed
+	require.Eventually(t, func() bool { return extensions.Load() >= 7 }, waitFor, pollEvery, "more than a lease length after the failure")
+	close(release)
+
+	require.NoError(t, <-causes, "the transient failure must not cancel the handler")
+	record := harness.eventuallyStatus(id, jobs.StatusCompleted)
+	require.Equal(t, 1, record.Attempt)
+	requireNoLostAttempt(t, harness.observer.results())
+}
+
+// Round 2, finding 3: an extension that hangs is bounded by the heartbeat interval, so the
+// self-fence still cancels within about a lease, not after the 10 s operation timeout.
+func TestAHangingExtensionStillSelfFences(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(&jobs.WorkerOptions{Store: &faultyStore{Store: harness.store, extendLeases: func(ctx context.Context, _ []jobs.Lease, _ time.Duration) ([]jobs.HeldLease, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}})
+	started, causes := make(chan struct{}, 1), make(chan error, 1)
+	require.NoError(t, jobs.Handle(worker, kind, blockingHandler(started, causes)))
+	harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+	harness.run(worker)
+	<-started
+
+	select {
+	case cause := <-causes:
+		require.ErrorIs(t, cause, jobs.ErrLeaseLost)
+	case <-time.After(2 * time.Second):
+		t.Fatal("a hanging extension delayed the self-fence")
+	}
+}
+
+// Round 2, finding 4: finished attempts are forgotten, so the heartbeat stops once no job runs.
+func TestFinishedAttemptsAreNoLongerExtended(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	var nonEmptyExtensions atomic.Int32
+	worker := harness.worker(&jobs.WorkerOptions{Store: &faultyStore{Store: harness.store, extendLeases: func(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error) {
+		if len(leases) > 0 {
+			nonEmptyExtensions.Add(1)
+		}
+		return harness.store.ExtendLeases(ctx, leases, duration)
+	}}})
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	ids := make([]uuid.UUID, 0, 5)
+	for range 5 {
+		ids = append(ids, harness.enqueue(context.Background(), kind.New(mailPayload{}, nil)))
+	}
+
+	harness.run(worker)
+	for _, id := range ids {
+		harness.eventuallyStatus(id, jobs.StatusCompleted)
+	}
+	afterCompletion := nonEmptyExtensions.Load()
+	rescues := harness.observer.count(jobs.OperationRescue)
+	require.Eventually(t, func() bool { return harness.observer.count(jobs.OperationRescue) >= rescues+15 }, waitFor, pollEvery, "several heartbeat intervals pass")
+
+	require.Equal(t, afterCompletion, nonEmptyExtensions.Load(), "the heartbeat still extends finished attempts")
+}
+
+// Round 2, finding 10: RunDue on a cancelled context claims nothing, so no attempt is spent.
+func TestRunDueOnACancelledContextClaimsNothing(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(nil)
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	attempts, err := worker.RunDue(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, attempts)
+	record := harness.record(id)
+	require.Equal(t, jobs.StatusPending, record.Status)
+	require.Zero(t, record.Attempt)
+}
+
+// Round 2, finding 11: after Run returned, the worker is not "running" any more.
+func TestAWorkerCanBeUsedAgainAfterRunReturned(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(nil)
+	worker := harness.worker(nil)
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	stop := harness.run(worker)
+	stop()
+
+	require.NoError(t, jobs.Handle(worker, jobs.NewKind[mailPayload]("mail.later", &jobs.KindOptions{Queue: "mail"}), func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+	attempts, err := worker.RunDue(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, attempts)
+	require.Equal(t, jobs.StatusCompleted, harness.record(id).Status)
 }

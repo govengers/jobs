@@ -5,7 +5,7 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{
     Store:  jobStore,
     Queues: map[string]jobs.QueueOptions{
         "mail":       {Concurrency: 4},
-        "generation": {Concurrency: 2, Lease: time.Minute},
+        "generation": {Concurrency: 2, LeaseDuration: time.Minute},
     },
     Middleware:  []jobs.Middleware{wideEvents},          // first is outermost
     Propagators: []jobs.Propagator{authadapter.Identity()},
@@ -23,7 +23,7 @@ Register every handler before `Run`. A `Worker` runs once.
 | Option | Default | Meaning |
 |--------|---------|---------|
 | `Concurrency` | 1 | jobs of this queue running at once in this process |
-| `Lease` | 30 s | how long a claim holds a job without a heartbeat (minimum 30 ms) |
+| `LeaseDuration` | 30 s | how long a claim holds a job without a heartbeat (minimum 30 ms) |
 | `PollInterval` | 1 s | how long an idle queue waits before it looks again; a full batch polls again at once |
 
 The worker claims only as many jobs as it has free slots, so no claimed job waits in memory while its lease runs out.
@@ -43,7 +43,7 @@ A bug on the handler's side is a failed attempt, never an error of `Run`: a pani
 
 ## Leases, heartbeat and fencing
 
-A claim sets a fresh lease token and `lease_until`. While the handler runs, the worker extends the leases of its running jobs every Lease/3, so a job may take ten seconds or ten minutes on the same queue. When the extension finds a job no longer leased, the handler's context is cancelled with cause `jobs.ErrLeaseLost` and its result is discarded. Every write after the claim matches the token, so a worker that lost its lease cannot overwrite a newer attempt. When the extensions fail (a database outage, a network partition) the worker cannot know whether another replica already rescued the job, so an attempt whose lease could not be confirmed for longer than the lease is cancelled with `jobs.ErrLeaseLost` as well. `context.Cause(ctx)` tells a handler why its context ended: `jobs.ErrLeaseLost`, `jobs.ErrCancelled`, or the end of the drain.
+A claim sets a fresh lease token and `lease_until`. While the handler runs, the worker extends the leases of its running jobs every LeaseDuration/3, so a job may take ten seconds or ten minutes on the same queue. When the extension finds a job no longer leased, the handler's context is cancelled with cause `jobs.ErrLeaseLost` and its result is discarded. Every write after the claim matches the token, so a worker that lost its lease cannot overwrite a newer attempt. When the extensions fail (a database outage, a network partition) the worker cannot know whether another replica already rescued the job, so an attempt whose lease could not be confirmed for longer than the lease is cancelled with `jobs.ErrLeaseLost` as well. `context.Cause(ctx)` tells a handler why its context ended: `jobs.ErrLeaseLost`, `jobs.ErrCancelled`, or the end of the drain.
 
 ## Shutdown
 

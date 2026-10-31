@@ -68,7 +68,7 @@ func (harness *testHarness) worker(options *jobs.WorkerOptions) *jobs.Worker {
 		options.Observer = harness.observer
 	}
 	if options.Queues == nil {
-		options.Queues = map[string]jobs.QueueOptions{"mail": {Concurrency: 2, Lease: testLease, PollInterval: pollEvery}}
+		options.Queues = map[string]jobs.QueueOptions{"mail": {Concurrency: 2, LeaseDuration: testLease, PollInterval: pollEvery}}
 	}
 	options.Propagators = []jobs.Propagator{tenantPropagator{}}
 	options.RescueInterval = orDefault(options.RescueInterval, 20*time.Millisecond)
@@ -246,7 +246,7 @@ func TestTwoWorkersNeverRunTheSameJobAtOnce(t *testing.T) {
 		ids = append(ids, harness.enqueue(context.Background(), kind.New(mailPayload{}, nil)))
 	}
 	for range 2 {
-		worker := harness.worker(&jobs.WorkerOptions{Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 4, Lease: testLease, PollInterval: pollEvery}}})
+		worker := harness.worker(&jobs.WorkerOptions{Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 4, LeaseDuration: testLease, PollInterval: pollEvery}}})
 		require.NoError(t, jobs.Handle(worker, kind, handler))
 		harness.run(worker)
 	}
@@ -445,7 +445,7 @@ func TestRescuerReturnsAJobOfADeadWorker(t *testing.T) {
 	harness := newHarness(t)
 	kind := mailKind(nil)
 	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
-	_, err := harness.store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 1, Lease: time.Microsecond, Worker: "crashed"})
+	_, err := harness.store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 1, LeaseDuration: time.Microsecond, Worker: "crashed"})
 	require.NoError(t, err)
 	worker := harness.worker(nil)
 	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))

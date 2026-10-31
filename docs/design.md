@@ -90,6 +90,7 @@ Rejected: a shared "bus" database all services connect to (couples every service
 | J43 | (fix round, findings 33, 35, 36, 37; refines J10, J15, J16) The wide-event middleware is `wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emitter})` (J28), not the `Middleware(emitter)` of J16 and the old section 6. J15's OpenTelemetry propagation is the application's: the module ships no OTel dependency, the wiki shows the propagator in a few lines with `propagation.TraceContext` and `propagation.MapCarrier`. J10's release happens when the handler returns after the drain's cancel: an error releases, nil completes, a `Snooze` wins and delays; a handler that ignores its context keeps the job until it returns or the process dies, then the rescuer takes over. Examples start `Run` inside `recovering` (CON-001). |
 | J44 | (fix round, findings 38, 39, 40; refines J31) `examples/signup` names its scope in its package comment (job integration, not a service template) and all three simplifications, `net/http` instead of Gin included. It wires `prometheusadapter` as the worker's Observer and serves `/metrics` on an internal listener, and its repository wraps every error with the operation and the user. |
 | J45 | (review round 2, findings 1, 5, 6, 7, 8, 9, 15, 18; refines J11, J34, J39) `DailyAt` advances the calendar date on its own (year, month, day + n) before it resolves the wall clock, so a midnight schedule in a zone that switches at midnight runs on the transition day at the end of the gap; an hour outside 0..23 or a minute outside 0..59 gives a `Next` that `NewWorker` rejects. Each schedule has its own transaction per check, so one refused `Next` or failed enqueue does not roll back the others; the failures come back joined, each naming its schedule. `Next` is compared with now at microsecond precision. Scheduled jobs are enqueued on a context without the values of `Run`'s context, so propagators inject nothing from it. `NewWorker` encodes a schedule's payload once (a `NewJob` it keeps is now really immutable). |
+| J46 | (review round 2, findings 2, 3, 4, 10, 11, 17, 19; refines J4, J7, J37, J38) The lease durations are `QueueOptions.LeaseDuration`, `ClaimRequest.LeaseDuration` and `DefaultLeaseDuration` (NAM-009: `Lease` is the claim, a job ID and a token). The worker is no longer "running" once `Run` returned: `Run`, `RunDue` and `Handle` work again. `RunDue` claims no batch on a cancelled context. J37's grace period, the heartbeat interval of a third of the lease, the extension's bound by that interval and the forgetting of finished attempts are each pinned by a test. |
 
 ## 3. Decisions: events
 
@@ -210,7 +211,7 @@ func (r *RenderRepository) Create(ctx context.Context, input *model.RenderInput)
 // main: the job controller is the transport layer, the service holds the logic (ARC-001)
 worker, err := jobs.NewWorker(&jobs.WorkerOptions{
     Store:       jobStore,
-    Queues:      jobQueues, // from JOB_QUEUES, e.g. {"generation": {Concurrency: 3, Lease: 30 * time.Second}}
+    Queues:      jobQueues, // from JOB_QUEUES, e.g. {"generation": {Concurrency: 3, LeaseDuration: 30 * time.Second}}
     Middleware:  []jobs.Middleware{wideEvents}, // wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emitter: emitter})
     Propagators: []jobs.Propagator{authadapter.Identity()},
     Observer:    jobMetrics,

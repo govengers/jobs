@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// minimumLease keeps the heartbeat interval (Lease/3) meaningful.
-const minimumLease = 30 * time.Millisecond
+// minimumLeaseDuration keeps the heartbeat interval (Lease/3) meaningful.
+const minimumLeaseDuration = 30 * time.Millisecond
 
 func queuesWithDefaults(queues map[string]QueueOptions) (map[string]QueueOptions, error) {
 	withDefaults := make(map[string]QueueOptions, len(queues))
@@ -15,14 +15,14 @@ func queuesWithDefaults(queues map[string]QueueOptions) (map[string]QueueOptions
 		if name == "" {
 			return nil, errors.New("jobs: a queue needs a name")
 		}
-		if options.Concurrency < 0 || options.Lease < 0 || options.PollInterval < 0 {
+		if options.Concurrency < 0 || options.LeaseDuration < 0 || options.PollInterval < 0 {
 			return nil, fmt.Errorf("jobs: queue %s: negative concurrency, lease or poll interval", name)
 		}
 		options.Concurrency = orDefault(options.Concurrency, DefaultConcurrency)
-		options.Lease = orDefault(options.Lease, DefaultLease)
+		options.LeaseDuration = orDefault(options.LeaseDuration, DefaultLeaseDuration)
 		options.PollInterval = orDefault(options.PollInterval, DefaultPollInterval)
-		if options.Lease < minimumLease {
-			return nil, fmt.Errorf("jobs: queue %s: lease %s is shorter than %s", name, options.Lease, minimumLease)
+		if options.LeaseDuration < minimumLeaseDuration {
+			return nil, fmt.Errorf("jobs: queue %s: lease %s is shorter than %s", name, options.LeaseDuration, minimumLeaseDuration)
 		}
 		withDefaults[name] = options
 	}
