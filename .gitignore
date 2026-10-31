@@ -1,3 +1,4 @@
+# Scratch output of the justfile: test reports, coverage, e2e builds and the e2e skip keys (LAY-001)
 sandbox/
 *.test
 *.out

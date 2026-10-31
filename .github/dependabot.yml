@@ -1,0 +1,12 @@
+# Weekly update PRs for what the build pins: Go modules and tools and the workflow's actions.
+# CI gates every PR like any other.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
