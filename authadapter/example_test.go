@@ -11,7 +11,7 @@ import (
 
 func ExampleIdentity() {
 	// main configures the same propagator on both sides:
-	//   postgresadapter.StoreOptions{Propagators: []jobs.Propagator{authadapter.Identity()}}
+	//   postgresadapter.Options{Propagators: []jobs.Propagator{authadapter.Identity()}}
 	//   jobs.WorkerOptions{Propagators: []jobs.Propagator{authadapter.Identity()}}
 	propagator := authadapter.Identity()
 

@@ -31,7 +31,7 @@ UPDATE govengers_jobs AS job SET
     updated_at = now()
 FROM next
 WHERE job.id = next.id
-RETURNING job.id, job.lease_token, job.queue, job.kind, job.payload, job.headers, job.attempt, job.max_attempts`
+RETURNING job.id, job.lease_token, job.queue, job.kind, job.payload, job.headers, job.attempt, job.maximum_attempts`
 
 // Claim implements jobs.Store.
 func (s *Store) Claim(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error) {
@@ -41,7 +41,7 @@ func (s *Store) Claim(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.
 	}
 	claims, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*jobs.Claim, error) {
 		claim := &jobs.Claim{}
-		err := row.Scan(&claim.Lease.JobID, &claim.Lease.Token, &claim.Queue, &claim.Kind, &claim.Payload, &claim.Headers, &claim.Attempt, &claim.MaxAttempts)
+		err := row.Scan(&claim.Lease.JobID, &claim.Lease.Token, &claim.Queue, &claim.Kind, &claim.Payload, &claim.Headers, &claim.Attempt, &claim.MaximumAttempts)
 		return claim, err
 	})
 	return claims, wrapDriverError(err, "claim jobs of queue %s", request.Queue)
@@ -111,12 +111,12 @@ WITH expired AS (
 UPDATE govengers_jobs AS job SET
     status = CASE
         WHEN job.cancel_requested THEN 'cancelled'
-        WHEN job.attempt >= job.max_attempts THEN 'dead'
+        WHEN job.attempt >= job.maximum_attempts THEN 'dead'
         ELSE 'pending'
     END,
     run_at = now(),
     last_error = 'lease expired: the worker stopped without finishing the job',
-    finished_at = CASE WHEN job.cancel_requested OR job.attempt >= job.max_attempts THEN now() END,
+    finished_at = CASE WHEN job.cancel_requested OR job.attempt >= job.maximum_attempts THEN now() END,
     lease_token = NULL,
     lease_until = NULL,
     worker = NULL,
@@ -164,7 +164,7 @@ UPDATE govengers_job_schedules SET next_run_at = $2, updated_at = now() WHERE na
 
 // EnqueueDueSchedules implements jobs.Store. One transaction registers, claims, enqueues and
 // advances, so a schedule's job is enqueued once per period however many workers call it.
-func (s *Store) EnqueueDueSchedules(ctx context.Context, schedules []*jobs.Schedule) (int, error) {
+func (s *Store) EnqueueDueSchedules(ctx context.Context, schedules []jobs.Schedule) (int, error) {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, wrapDriverError(err, "begin schedules")
@@ -190,8 +190,8 @@ func (s *Store) EnqueueDueSchedules(ctx context.Context, schedules []*jobs.Sched
 	return len(due), wrapDriverError(transaction.Commit(ctx), "commit schedules")
 }
 
-func registerSchedules(ctx context.Context, transaction pgx.Tx, schedules []*jobs.Schedule, now time.Time) (map[string]*jobs.Schedule, error) {
-	byName := make(map[string]*jobs.Schedule, len(schedules))
+func registerSchedules(ctx context.Context, transaction pgx.Tx, schedules []jobs.Schedule, now time.Time) (map[string]jobs.Schedule, error) {
+	byName := make(map[string]jobs.Schedule, len(schedules))
 	for _, schedule := range schedules {
 		byName[schedule.Name] = schedule
 		if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, schedule.Next(now)); err != nil {
@@ -201,7 +201,7 @@ func registerSchedules(ctx context.Context, transaction pgx.Tx, schedules []*job
 	return byName, nil
 }
 
-func claimDue(ctx context.Context, transaction pgx.Tx, byName map[string]*jobs.Schedule) ([]*jobs.Schedule, error) {
+func claimDue(ctx context.Context, transaction pgx.Tx, byName map[string]jobs.Schedule) ([]jobs.Schedule, error) {
 	names := make([]string, 0, len(byName))
 	for name := range byName {
 		names = append(names, name)
@@ -214,14 +214,14 @@ func claimDue(ctx context.Context, transaction pgx.Tx, byName map[string]*jobs.S
 	if err != nil {
 		return nil, wrapDriverError(err, "claim due schedules")
 	}
-	due := make([]*jobs.Schedule, 0, len(dueNames))
+	due := make([]jobs.Schedule, 0, len(dueNames))
 	for _, name := range dueNames {
 		due = append(due, byName[name])
 	}
 	return due, nil
 }
 
-func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule *jobs.Schedule, now time.Time) error {
+func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) error {
 	if _, err := s.Enqueue(ctx, transaction, schedule.Job); err != nil {
 		return fmt.Errorf("enqueue schedule %s: %w", schedule.Name, err)
 	}

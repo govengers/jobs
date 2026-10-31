@@ -56,7 +56,7 @@ type WorkerOptions struct {
 	Middleware  []Middleware
 	Propagators []Propagator // restore the enqueuing context's values before the handler runs (J15)
 	Observer    Observer     // nil reports nothing
-	Schedules   []*Schedule  // recurring jobs this worker enqueues once per period with every other worker
+	Schedules   []Schedule   // recurring jobs this worker enqueues once per period with every other worker
 	// DrainTimeout is how long Run lets running handlers finish after its context is cancelled;
 	// then their contexts are cancelled and their jobs released to another worker.
 	DrainTimeout     time.Duration
@@ -86,7 +86,7 @@ type Worker struct {
 	middleware  []Middleware
 	propagators []Propagator
 	observer    Observer
-	schedules   []*Schedule
+	schedules   []Schedule
 	timing      timing
 
 	mutex    sync.Mutex
@@ -115,6 +115,9 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 	if err := validateSchedules(options.Schedules); err != nil {
 		return nil, err
 	}
+	if err := validateCollaborators(options); err != nil {
+		return nil, err
+	}
 	name, err := workerName(options.Name)
 	if err != nil {
 		return nil, err
@@ -130,7 +133,7 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 		middleware:  append([]Middleware(nil), options.Middleware...),
 		propagators: append([]Propagator(nil), options.Propagators...),
 		observer:    observer,
-		schedules:   append([]*Schedule(nil), options.Schedules...),
+		schedules:   append([]Schedule(nil), options.Schedules...),
 		timing:      durations,
 		handlers:    map[string]registeredHandler{},
 	}, nil
@@ -154,7 +157,7 @@ func Handle[P any](worker *Worker, kind *Kind[P], handler func(ctx context.Conte
 		}
 		return handler(ctx, &Job[P]{
 			ID: claim.Lease.JobID, Queue: claim.Queue, Kind: claim.Kind,
-			Attempt: claim.Attempt, MaxAttempts: claim.MaxAttempts, Payload: payload,
+			Attempt: claim.Attempt, MaximumAttempts: claim.MaximumAttempts, Payload: payload,
 		})
 	}
 	return worker.register(kind.name, registeredHandler{handler: decoding, backoff: kind.backoff})

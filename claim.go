@@ -29,21 +29,21 @@ type Lease struct {
 
 // Claim is a job a worker claimed for one attempt, as middleware and the store see it.
 type Claim struct {
-	Lease       Lease
-	Queue       string
-	Kind        string
-	Payload     json.RawMessage
-	Headers     map[string]string // written by the Propagators at enqueue time
-	Attempt     int               // 1 for the first attempt
-	MaxAttempts int
+	Lease           Lease
+	Queue           string
+	Kind            string
+	Payload         json.RawMessage
+	Headers         map[string]string // written by the Propagators at enqueue time
+	Attempt         int               // 1 for the first attempt
+	MaximumAttempts int
 }
 
 // Job is the typed view of a claimed job that a handler registered with Handle receives.
 type Job[P any] struct {
-	ID          uuid.UUID
-	Queue       string
-	Kind        string
-	Attempt     int // 1 for the first attempt
-	MaxAttempts int
-	Payload     P
+	ID              uuid.UUID
+	Queue           string
+	Kind            string
+	Attempt         int // 1 for the first attempt
+	MaximumAttempts int
+	Payload         P
 }

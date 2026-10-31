@@ -28,7 +28,7 @@ type TaskPayload struct {
 }
 
 var (
-	taskKind = jobs.NewKind[TaskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaxAttempts: 5})
+	taskKind = jobs.NewKind[TaskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaximumAttempts: 5})
 	tickKind = jobs.NewKind[struct{}]("e2e.tick", &jobs.KindOptions{Queue: "e2e"})
 )
 
@@ -79,7 +79,7 @@ func readTiming() (timing, error) {
 }
 
 func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker, error) {
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker,
 		DrainTimeout:     durations.drainTimeout,
 		RescueInterval:   200 * time.Millisecond,
 		ScheduleInterval: 100 * time.Millisecond,
-		Schedules: []*jobs.Schedule{{
+		Schedules: []jobs.Schedule{{
 			Name: "e2e.tick",
 			Next: jobs.Every(durations.scheduleEvery),
 			Job:  tickKind.New(struct{}{}, nil),

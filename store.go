@@ -27,7 +27,7 @@ type Store interface {
 	// EnqueueDueSchedules registers the schedules that have no row yet, enqueues the job of
 	// every due schedule no other worker is enqueuing, advances it and returns how many jobs
 	// it enqueued.
-	EnqueueDueSchedules(ctx context.Context, schedules []*Schedule) (int, error)
+	EnqueueDueSchedules(ctx context.Context, schedules []Schedule) (int, error)
 }
 
 // ClaimRequest asks the store for runnable jobs of one queue.

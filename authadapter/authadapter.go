@@ -16,7 +16,7 @@ import (
 const HeaderIdentity = "auth.identity"
 
 // Identity returns the jobs.Propagator for the identity. Configure it on both sides, in
-// postgresadapter.StoreOptions.Propagators and jobs.WorkerOptions.Propagators.
+// postgresadapter.Options.Propagators and jobs.WorkerOptions.Propagators.
 //
 // Inject stores the JSON snapshot of auth.IdentityFrom(ctx); without an identity it stores
 // nothing. Extract restores it with auth.WithIdentity. The snapshot is the identity at enqueue

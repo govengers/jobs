@@ -50,4 +50,4 @@ type WelcomeMailPayload struct {
 
 // WelcomeMailKind is the contract between the repository that enqueues the welcome mail and
 // the job controller that sends it.
-var WelcomeMailKind = jobs.NewKind[WelcomeMailPayload]("signup.welcome_mail", &jobs.KindOptions{Queue: "mail", MaxAttempts: 8})
+var WelcomeMailKind = jobs.NewKind[WelcomeMailPayload]("signup.welcome_mail", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 8})

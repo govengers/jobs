@@ -22,9 +22,9 @@ type mailPayload struct {
 
 func TestDrainRunsEveryRunnableJob(t *testing.T) {
 	pool := postgrestest.New(t)
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	require.NoError(t, err)
-	mail := jobs.NewKind[mailPayload]("mail.send", &jobs.KindOptions{Queue: "mail", MaxAttempts: 3, Backoff: func(int) time.Duration { return 0 }})
+	mail := jobs.NewKind[mailPayload]("mail.send", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 3, Backoff: func(int) time.Duration { return 0 }})
 	waiting := jobs.NewKind[mailPayload]("mail.later", &jobs.KindOptions{Queue: "mail"})
 	worker, err := jobs.NewWorker(&jobs.WorkerOptions{Store: store, Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: 2}}})
 	require.NoError(t, err)

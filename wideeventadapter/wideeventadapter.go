@@ -17,14 +17,14 @@ import (
 
 // The fields the middleware records, besides the event name job.<queue>, outcome and error.
 const (
-	KeyJobID          = "job.id"
-	KeyJobQueue       = "job.queue"
-	KeyJobKind        = "job.kind"
-	KeyJobAttempt     = "job.attempt"
-	KeyJobMaxAttempts = "job.max_attempts"
-	KeyJobPermanent   = "job.permanent"    // true when the handler marked its failure with jobs.Permanent
-	KeyJobSnoozed     = "job.snoozed"      // the snooze delay when the handler returned jobs.Snooze
-	KeyJobCancelCause = "job.cancel_cause" // why the attempt's context was cancelled: lease lost, cancelled, shutdown
+	KeyJobID              = "job.id"
+	KeyJobQueue           = "job.queue"
+	KeyJobKind            = "job.kind"
+	KeyJobAttempt         = "job.attempt"
+	KeyJobMaximumAttempts = "job.maximum_attempts"
+	KeyJobPermanent       = "job.permanent"    // true when the handler marked its failure with jobs.Permanent
+	KeyJobSnoozed         = "job.snoozed"      // the snooze delay when the handler returned jobs.Snooze
+	KeyJobCancelCause     = "job.cancel_cause" // why the attempt's context was cancelled: lease lost, cancelled, shutdown
 )
 
 // Options configures the middleware.
@@ -62,7 +62,7 @@ func begin(emitter wideevent.Emitter, claim *jobs.Claim) *wideevent.Event {
 		String(KeyJobQueue, claim.Queue).
 		String(KeyJobKind, claim.Kind).
 		Int(KeyJobAttempt, claim.Attempt).
-		Int(KeyJobMaxAttempts, claim.MaxAttempts)
+		Int(KeyJobMaximumAttempts, claim.MaximumAttempts)
 	return we
 }
 

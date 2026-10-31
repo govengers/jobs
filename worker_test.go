@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
@@ -49,7 +50,7 @@ type testHarness struct {
 func newHarness(t *testing.T) *testHarness {
 	t.Helper()
 	pool := postgrestest.New(t)
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool, Propagators: []jobs.Propagator{tenantPropagator{}}})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool, Propagators: []jobs.Propagator{tenantPropagator{}}})
 	require.NoError(t, err)
 	return &testHarness{t: t, pool: pool, store: store, observer: &recordingObserver{}}
 }
@@ -201,7 +202,7 @@ func TestWorkerRunsTheHandlerWithPayloadContextAndMiddleware(t *testing.T) {
 	require.Equal(t, id, job.ID)
 	require.Equal(t, "ada@example.com", job.Payload.Recipient)
 	require.Equal(t, 1, job.Attempt)
-	require.Equal(t, jobs.DefaultMaxAttempts, job.MaxAttempts)
+	require.Equal(t, jobs.DefaultMaximumAttempts, job.MaximumAttempts)
 	require.Equal(t, "mail", job.Queue)
 	require.Equal(t, "tenant-7", <-tenants)
 	require.Equal(t, "mail.send", middlewareSaw.Load())
@@ -254,7 +255,7 @@ func TestTwoWorkersNeverRunTheSameJobAtOnce(t *testing.T) {
 
 func TestPermanentIsDeadAtOnce(t *testing.T) {
 	harness := newHarness(t)
-	kind := mailKind(&jobs.KindOptions{MaxAttempts: 5})
+	kind := mailKind(&jobs.KindOptions{MaximumAttempts: 5})
 	worker := harness.worker(nil)
 	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error {
 		return jobs.Permanent(errors.New("mailbox does not exist"))
@@ -270,7 +271,7 @@ func TestPermanentIsDeadAtOnce(t *testing.T) {
 
 func TestSnoozeDoesNotCountTheAttempt(t *testing.T) {
 	harness := newHarness(t)
-	kind := mailKind(&jobs.KindOptions{MaxAttempts: 1})
+	kind := mailKind(&jobs.KindOptions{MaximumAttempts: 1})
 	worker := harness.worker(nil)
 	var calls, lastAttempt atomic.Int32
 	require.NoError(t, jobs.Handle(worker, kind, func(_ context.Context, job *jobs.Job[mailPayload]) error {
@@ -313,7 +314,7 @@ func TestRetryWaitsForTheBackoff(t *testing.T) {
 
 func TestDeadAfterTheLastAttempt(t *testing.T) {
 	harness := newHarness(t)
-	kind := mailKind(&jobs.KindOptions{MaxAttempts: 3, Backoff: noBackoff})
+	kind := mailKind(&jobs.KindOptions{MaximumAttempts: 3, Backoff: noBackoff})
 	worker := harness.worker(nil)
 	var calls atomic.Int32
 	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error {
@@ -444,10 +445,10 @@ func TestSchedulesEnqueueOncePerPeriodAcrossTwoWorkers(t *testing.T) {
 	kind := mailKind(nil)
 	_, err := harness.pool.Exec(context.Background(), "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('daily-digest', now() - interval '1 minute')")
 	require.NoError(t, err)
-	schedule := &jobs.Schedule{Name: "daily-digest", Next: jobs.Every(24 * time.Hour), Job: kind.New(mailPayload{Recipient: "team@example.com"}, nil)}
+	schedule := jobs.Schedule{Name: "daily-digest", Next: jobs.Every(24 * time.Hour), Job: kind.New(mailPayload{Recipient: "team@example.com"}, nil)}
 	var runs atomic.Int32
 	for range 2 {
-		worker := harness.worker(&jobs.WorkerOptions{Schedules: []*jobs.Schedule{schedule}})
+		worker := harness.worker(&jobs.WorkerOptions{Schedules: []jobs.Schedule{schedule}})
 		require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error {
 			runs.Add(1)
 			return nil
@@ -518,7 +519,7 @@ func TestRetentionSweepsCompletedJobs(t *testing.T) {
 
 func TestRunDueRunsRunnableJobsSynchronously(t *testing.T) {
 	harness := newHarness(t)
-	kind := mailKind(&jobs.KindOptions{Backoff: noBackoff, MaxAttempts: 2})
+	kind := mailKind(&jobs.KindOptions{Backoff: noBackoff, MaximumAttempts: 2})
 	worker := harness.worker(nil)
 	var calls atomic.Int32
 	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error {
@@ -534,4 +535,20 @@ func TestRunDueRunsRunnableJobsSynchronously(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, attempts)
 	require.Equal(t, jobs.StatusCompleted, harness.record(id).Status)
+}
+
+func TestNewWorkerOwnsItsSchedules(t *testing.T) {
+	harness := newHarness(t)
+	options := &jobs.WorkerOptions{Schedules: []jobs.Schedule{{Name: "original", Next: jobs.Every(time.Hour), Job: mailKind(nil).New(mailPayload{}, nil)}}}
+	worker := harness.worker(options)
+
+	options.Schedules[0].Name = "changed after NewWorker"
+	harness.run(worker)
+
+	require.Eventually(t, func() bool { return harness.observer.count(jobs.OperationSchedules) >= 2 }, waitFor, pollEvery)
+	rows, err := harness.pool.Query(context.Background(), "SELECT name FROM govengers_job_schedules")
+	require.NoError(t, err)
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	require.Equal(t, []string{"original"}, names)
 }

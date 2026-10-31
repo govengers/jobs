@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -23,14 +24,14 @@ type mailPayload struct {
 	Recipient string `json:"recipient"`
 }
 
-var mailKind = jobs.NewKind[mailPayload]("mail.send", &jobs.KindOptions{Queue: "mail", MaxAttempts: 3})
+var mailKind = jobs.NewKind[mailPayload]("mail.send", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 3})
 
 const lease = time.Minute
 
 func newStore(t *testing.T) (*postgresadapter.Store, *pgxpool.Pool) {
 	t.Helper()
 	pool := postgrestest.New(t)
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	require.NoError(t, err)
 	return store, pool
 }
@@ -58,11 +59,30 @@ func get(t *testing.T, store *postgresadapter.Store, id uuid.UUID) *postgresadap
 	return record
 }
 
-func TestNewStoreRequiresPool(t *testing.T) {
-	_, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{})
+func TestNewValidatesOptions(t *testing.T) {
+	_, err := postgresadapter.New(&postgresadapter.Options{})
 	require.Error(t, err)
-	_, err = postgresadapter.NewStore(nil)
+	_, err = postgresadapter.New(nil)
 	require.Error(t, err)
+	_, err = postgresadapter.New(&postgresadapter.Options{Pool: &pgxpool.Pool{}, Propagators: []jobs.Propagator{nil}})
+	require.ErrorContains(t, err, "Propagators[0] is nil")
+}
+
+// queryRowOnly is the smallest Executor: Enqueue needs nothing but QueryRow (DES-004).
+type queryRowOnly struct{ pool *pgxpool.Pool }
+
+func (e queryRowOnly) QueryRow(ctx context.Context, statement string, arguments ...any) pgx.Row {
+	return e.pool.QueryRow(ctx, statement, arguments...)
+}
+
+func TestEnqueueNeedsOnlyQueryRow(t *testing.T) {
+	store, pool := newStore(t)
+	var executor postgresadapter.Executor = queryRowOnly{pool: pool}
+
+	ids, err := store.Enqueue(context.Background(), executor, mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "once"}), mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "once"}))
+
+	require.NoError(t, err)
+	require.Equal(t, ids[0], ids[1])
 }
 
 func TestEnqueueAndClaim(t *testing.T) {
@@ -75,7 +95,7 @@ func TestEnqueueAndClaim(t *testing.T) {
 	require.NotEqual(t, uuid.Nil, claim.Lease.Token)
 	require.Equal(t, "mail.send", claim.Kind)
 	require.Equal(t, 1, claim.Attempt)
-	require.Equal(t, 3, claim.MaxAttempts)
+	require.Equal(t, 3, claim.MaximumAttempts)
 	require.JSONEq(t, `{"recipient":"ada@example.com"}`, string(claim.Payload))
 	record := get(t, store, id)
 	require.Equal(t, jobs.StatusRunning, record.Status)
@@ -144,7 +164,7 @@ func (tenantPropagator) Extract(ctx context.Context, headers map[string]string) 
 
 func TestEnqueueStoresPropagatedHeaders(t *testing.T) {
 	pool := postgrestest.New(t)
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool, Propagators: []jobs.Propagator{tenantPropagator{}}})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool, Propagators: []jobs.Propagator{tenantPropagator{}}})
 	require.NoError(t, err)
 	ctx := context.WithValue(context.Background(), tenantKey{}, "tenant-7")
 
@@ -296,7 +316,7 @@ func TestRescue(t *testing.T) {
 	ctx := context.Background()
 	retried := enqueue(t, store, pool, nil)
 	claimOne(t, store, time.Microsecond)
-	exhausted, err := store.Enqueue(ctx, pool, jobs.NewKind[mailPayload]("mail.once", &jobs.KindOptions{Queue: "mail", MaxAttempts: 1}).New(mailPayload{}, nil))
+	exhausted, err := store.Enqueue(ctx, pool, jobs.NewKind[mailPayload]("mail.once", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 1}).New(mailPayload{}, nil))
 	require.NoError(t, err)
 	claimOne(t, store, time.Microsecond)
 	cancelled := enqueue(t, store, pool, nil)
@@ -349,17 +369,17 @@ func TestSchedulesEnqueueOncePerPeriodAcrossWorkers(t *testing.T) {
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('nightly-report', now() - interval '1 minute')")
 	require.NoError(t, err)
-	schedule := &jobs.Schedule{
+	schedule := jobs.Schedule{
 		Name: "nightly-report",
 		Next: func(now time.Time) time.Time { return now.Add(time.Hour) },
 		Job:  mailKind.New(mailPayload{Recipient: "reports@example.com"}, nil),
 	}
-	registered := &jobs.Schedule{Name: "registered-later", Next: schedule.Next, Job: schedule.Job}
+	registered := jobs.Schedule{Name: "registered-later", Next: schedule.Next, Job: schedule.Job}
 	var total sync.Map
 	group, groupContext := errgroup.WithContext(ctx)
 	for worker := range 8 {
 		group.Go(func() error {
-			count, err := store.EnqueueDueSchedules(groupContext, []*jobs.Schedule{schedule, registered})
+			count, err := store.EnqueueDueSchedules(groupContext, []jobs.Schedule{schedule, registered})
 			total.Store(worker, count)
 			return err
 		})

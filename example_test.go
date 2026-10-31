@@ -18,7 +18,7 @@ type renderPayload struct {
 }
 
 // renderKind is the contract shared by the code that enqueues renders and the worker.
-var renderKind = jobs.NewKind[renderPayload]("generation.render", &jobs.KindOptions{Queue: "generation", MaxAttempts: 5})
+var renderKind = jobs.NewKind[renderPayload]("generation.render", &jobs.KindOptions{Queue: "generation", MaximumAttempts: 5})
 
 // This example wires a worker in main and enqueues a job inside a transaction, the way a
 // repository does. It needs a database with postgresadapter.MigrationV1 applied.
@@ -30,7 +30,7 @@ func ExampleNewWorker() {
 		return
 	}
 	defer pool.Close()
-	jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	if err != nil {
 		fmt.Println(err)
 		return

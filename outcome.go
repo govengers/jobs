@@ -75,7 +75,7 @@ type Finish struct {
 	Lease  Lease
 	Status Status        // pending, completed, dead or cancelled
 	Delay  time.Duration // pending: the job is claimable again after Delay
-	// ReturnAttempt gives the attempt back (snooze, release): it does not count towards MaxAttempts.
+	// ReturnAttempt gives the attempt back (snooze, release): it does not count towards MaximumAttempts.
 	ReturnAttempt bool
 	Error         string // recorded as the job's last error; empty keeps the previous one
 }
@@ -104,7 +104,7 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 	case errors.Is(cause, errShutdown):
 		finish.Status, finish.ReturnAttempt = StatusPending, true
 		return finish, ResultReleased
-	case IsPermanent(handlerError), claim.Attempt >= claim.MaxAttempts:
+	case IsPermanent(handlerError), claim.Attempt >= claim.MaximumAttempts:
 		finish.Status = StatusDead
 		return finish, ResultDead
 	default:

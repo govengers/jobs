@@ -88,7 +88,7 @@ func TestRetryDead(t *testing.T) {
 func TestQueueDepths(t *testing.T) {
 	store, pool := newStore(t)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, `INSERT INTO govengers_jobs (queue, kind, payload, max_attempts, run_at) VALUES
+	_, err := pool.Exec(ctx, `INSERT INTO govengers_jobs (queue, kind, payload, maximum_attempts, run_at) VALUES
         ('mail', 'mail.send', '{}', 1, now() + interval '1 hour'),
         ('reports', 'report.build', '{}', 1, now() - interval '90 seconds')`)
 	require.NoError(t, err)

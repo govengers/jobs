@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/govengers/jobs"
@@ -24,31 +23,35 @@ type Store struct {
 	propagators []jobs.Propagator
 }
 
-// StoreOptions configures a Store.
-type StoreOptions struct {
+// Options configures a Store.
+type Options struct {
 	Pool *pgxpool.Pool // required; its search_path must reach the tables of MigrationV1
 	// Propagators write values of the enqueuing context into every job's headers; the worker's
 	// Propagators restore them.
 	Propagators []jobs.Propagator
 }
 
-// NewStore returns a Store on options.Pool.
-func NewStore(options *StoreOptions) (*Store, error) {
+// New returns a Store on options.Pool.
+func New(options *Options) (*Store, error) {
 	if options == nil || options.Pool == nil {
-		return nil, errors.New("postgresadapter: StoreOptions.Pool is required")
+		return nil, errors.New("postgresadapter: Options.Pool is required")
+	}
+	for index, propagator := range options.Propagators {
+		if propagator == nil {
+			return nil, fmt.Errorf("postgresadapter: Options.Propagators[%d] is nil", index)
+		}
 	}
 	return &Store{pool: options.Pool, propagators: append([]jobs.Propagator(nil), options.Propagators...)}, nil
 }
 
-// Executor runs the store's statements: a pgx.Tx, a *pgxpool.Pool or a *pgx.Conn.
+// Executor runs Enqueue's statements: a pgx.Tx, a *pgxpool.Pool or a *pgx.Conn. It is the one
+// method Enqueue needs, so any wrapper of those types satisfies it.
 type Executor interface {
-	Exec(ctx context.Context, statement string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, statement string, arguments ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, statement string, arguments ...any) pgx.Row
 }
 
 const insertJob = `
-INSERT INTO govengers_jobs (queue, kind, payload, headers, run_at, max_attempts, unique_key)
+INSERT INTO govengers_jobs (queue, kind, payload, headers, run_at, maximum_attempts, unique_key)
 VALUES ($1, $2, $3, $4, COALESCE($5, now()), $6, NULLIF($7, ''))
 ON CONFLICT (queue, unique_key) WHERE unique_key IS NOT NULL AND status = 'pending' DO NOTHING
 RETURNING id`
@@ -87,7 +90,7 @@ func insert(ctx context.Context, executor Executor, job *jobs.NewJob, headers ma
 	}
 	for range uniqueKeyRetries {
 		var id uuid.UUID
-		err := executor.QueryRow(ctx, insertJob, job.Queue(), job.Kind(), payload, headers, runAt, job.MaxAttempts(), job.UniqueKey()).Scan(&id)
+		err := executor.QueryRow(ctx, insertJob, job.Queue(), job.Kind(), payload, headers, runAt, job.MaximumAttempts(), job.UniqueKey()).Scan(&id)
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return id, wrapDriverError(err, "enqueue %s", job.Kind())
 		}

@@ -77,6 +77,8 @@ Rejected: a shared "bus" database all services connect to (couples every service
 | J30 | (WP5) The end-to-end suite runs the binary of `test/e2e/worker` (build tag `e2e`, built with `-race` by `just e2e-build`, path in `E2E_WORKER`) twice on one embedded PostgreSQL; the worker reads its lease, drain timeout and schedule period from `E2E_*` variables and records every run in a table of the test. The skip key of TST-015 covers the worker binary, the compiled suite and `test/e2e`. |
 | J31 | (WP5) `examples/signup` keeps three simplifications, each named in its code: `net/http` instead of Gin (no Gin in the module's dependencies), inline SQL instead of sqlc in the repository, and a self-applied schema instead of goose. Everything else follows the service rules: options constructors, controller -> service -> repository / client, the kind in `model`, enqueue in the repository's transaction, a job controller that maps not-found to `jobs.Permanent`. |
 | J32 | (WP5) Splitting queues across Deployments (`JOB_QUEUES`) is a wiring pattern in `main`, documented in the wiki, not a library option: `WorkerOptions.Queues` already is the switch. |
+| J33 | (fix round, review findings 12 and 13) Names are spelled out before v1 (NAM-001): `KindOptions.MaximumAttempts`, `DefaultMaximumAttempts`, `NewJob.MaximumAttempts()`, the `MaximumAttempts` fields of `Claim`, `Job` and `Record`, the column `maximum_attempts` and the wide event key `job.maximum_attempts` replace the `MaxAttempts` / `max_attempts` of J2, J8, J9, J17 and J20. `postgresadapter.New(&postgresadapter.Options{...})` replaces `NewStore` / `StoreOptions` (J21), matching DES-001's one-component naming and `prometheusadapter.New`. |
+| J34 | (fix round, findings 10, 11, 24, 25) `WorkerOptions.Schedules` is a `[]Schedule` value slice the worker copies (a `NewJob` is immutable, so sharing its pointer is safe), and `Store.EnqueueDueSchedules` takes `[]Schedule`. `postgresadapter.Executor` is only `QueryRow`, the one method `Enqueue` calls. `NewJob.EncodePayload` validates the job's own fields, so a zero `NewJob` is `ErrInvalidKind` too. `NewWorker` and `postgresadapter.New` reject nil middleware and propagators. |
 
 ## 3. Decisions: events
 
@@ -118,7 +120,7 @@ CREATE TABLE govengers_jobs (
                      CHECK (status IN ('pending', 'running', 'completed', 'dead', 'cancelled')),
     run_at           timestamptz NOT NULL DEFAULT now(),
     attempt          integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
-    max_attempts     integer NOT NULL CHECK (max_attempts > 0),
+    maximum_attempts integer NOT NULL CHECK (maximum_attempts > 0),
     unique_key       text,
     lease_token      uuid,
     lease_until      timestamptz,
@@ -163,8 +165,8 @@ type RenderPayload struct {
 }
 
 var RenderKind = jobs.NewKind[RenderPayload]("generation.render", &jobs.KindOptions{
-    Queue:       "generation",
-    MaxAttempts: 5,
+    Queue:           "generation",
+    MaximumAttempts: 5,
 })
 ```
 

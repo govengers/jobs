@@ -40,7 +40,7 @@ type taskPayload struct {
 }
 
 // taskKind matches the worker binary's e2e.task.
-var taskKind = jobs.NewKind[taskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaxAttempts: 5})
+var taskKind = jobs.NewKind[taskPayload]("e2e.task", &jobs.KindOptions{Queue: "e2e", MaximumAttempts: 5})
 
 type database struct {
 	pool  *pgxpool.Pool
@@ -53,7 +53,7 @@ func newDatabase(t *testing.T) *database {
 	_, err := pool.Exec(t.Context(), `CREATE TABLE e2e_runs (
         job_id uuid NOT NULL, worker text NOT NULL, attempt integer NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp())`)
 	require.NoError(t, err)
-	store, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	require.NoError(t, err)
 	return &database{pool: pool, store: store}
 }
