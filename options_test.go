@@ -33,6 +33,9 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 		"schedule of invalid kind": {Store: storeStub{}, Schedules: []jobs.Schedule{{
 			Name: "digest", Next: jobs.Every(time.Hour), Job: jobs.NewKind[mailPayload]("", nil).New(mailPayload{}, nil),
 		}}},
+		"daily at 24:00": {Store: storeStub{}, Schedules: []jobs.Schedule{{
+			Name: "digest", Next: jobs.DailyAt(24, 0, time.UTC), Job: kind.New(mailPayload{}, nil),
+		}}},
 		"nil middleware": {Store: storeStub{}, Middleware: []jobs.Middleware{nil}},
 		"nil propagator": {Store: storeStub{}, Propagators: []jobs.Propagator{nil}},
 	}

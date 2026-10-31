@@ -59,6 +59,24 @@ func timingWithDefaults(options *WorkerOptions) (timing, error) {
 	return durations, nil
 }
 
+// snapshotSchedules validates the schedules and returns the worker's own copies, their jobs'
+// payloads encoded once.
+func snapshotSchedules(schedules []Schedule) ([]Schedule, error) {
+	if err := validateSchedules(schedules); err != nil {
+		return nil, err
+	}
+	snapshots := make([]Schedule, 0, len(schedules))
+	for _, schedule := range schedules {
+		job, err := schedule.Job.snapshot()
+		if err != nil {
+			return nil, fmt.Errorf("jobs: schedule %s: %w", schedule.Name, err)
+		}
+		schedule.Job = job
+		snapshots = append(snapshots, schedule)
+	}
+	return snapshots, nil
+}
+
 func validateSchedules(schedules []Schedule) error {
 	names := make(map[string]bool, len(schedules))
 	now := time.Now()

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,6 +99,7 @@ type NewJob struct {
 	payload         any
 	runAt           time.Time
 	uniqueKey       string
+	encoded         json.RawMessage // set by snapshot: the payload as JSON, fixed
 }
 
 // Kind is the name of the job's kind.
@@ -122,9 +124,24 @@ func (j *NewJob) EncodePayload() (json.RawMessage, error) {
 	if err := validateKind(j.kind, j.queue, j.maximumAttempts); err != nil {
 		return nil, err
 	}
+	if j.encoded != nil {
+		return bytes.Clone(j.encoded), nil
+	}
 	payload, err := json.Marshal(j.payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode payload of %s: %w", j.kind, err)
 	}
 	return payload, nil
+}
+
+// snapshot returns a copy of the job with its payload encoded now, so a job a worker keeps (a
+// schedule's) does not follow later changes of the caller's payload value.
+func (j *NewJob) snapshot() (*NewJob, error) {
+	encoded, err := j.EncodePayload()
+	if err != nil {
+		return nil, err
+	}
+	copied := *j
+	copied.payload, copied.encoded = nil, encoded
+	return &copied, nil
 }

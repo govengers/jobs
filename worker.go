@@ -118,7 +118,8 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateSchedules(options.Schedules); err != nil {
+	schedules, err := snapshotSchedules(options.Schedules)
+	if err != nil {
 		return nil, err
 	}
 	if err := validateCollaborators(options); err != nil {
@@ -139,7 +140,7 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 		middleware:  append([]Middleware(nil), options.Middleware...),
 		propagators: append([]Propagator(nil), options.Propagators...),
 		observer:    guardedObserver{observer: observer},
-		schedules:   append([]Schedule(nil), options.Schedules...),
+		schedules:   schedules,
 		timing:      durations,
 		handlers:    map[string]registeredHandler{},
 	}, nil

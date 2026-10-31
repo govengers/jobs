@@ -161,75 +161,79 @@ func (s *Store) Sweep(ctx context.Context, request *jobs.SweepRequest) (int, err
 const (
 	registerSchedule = `
 INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING`
-	claimDueSchedules = `
-SELECT name FROM govengers_job_schedules
-WHERE name = ANY($1) AND next_run_at <= now()
-FOR UPDATE SKIP LOCKED`
+	claimDueSchedule = `
+SELECT EXISTS (
+    SELECT 1 FROM govengers_job_schedules
+    WHERE name = $1 AND next_run_at <= now()
+    FOR UPDATE SKIP LOCKED
+)`
 	advanceSchedule = `
 UPDATE govengers_job_schedules SET next_run_at = $2, updated_at = now() WHERE name = $1`
 )
 
-// EnqueueDueSchedules implements jobs.Store. One transaction registers, claims, enqueues and
-// advances, so a schedule's job is enqueued once per period however many workers call it.
+// EnqueueDueSchedules implements jobs.Store. Every schedule has a transaction of its own that
+// registers, claims, enqueues and advances it, so its job is enqueued once per period however
+// many workers call this, and a schedule that fails (a refused Next, a failed enqueue) does not
+// hold back the others. The failures come back joined, each naming its schedule.
 func (s *Store) EnqueueDueSchedules(ctx context.Context, schedules []jobs.Schedule) (int, error) {
+	enqueued := 0
+	var failures []error
+	for _, schedule := range schedules {
+		wasDue, err := s.enqueueIfDue(ctx, schedule)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if wasDue {
+			enqueued++
+		}
+	}
+	return enqueued, errors.Join(failures...)
+}
+
+// enqueueIfDue runs one schedule's transaction and reports whether it enqueued the job.
+func (s *Store) enqueueIfDue(ctx context.Context, schedule jobs.Schedule) (bool, error) {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0, wrapDriverError(err, "begin schedules")
+		return false, wrapDriverError(err, "begin schedule %s", schedule.Name)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }() // a no-op after Commit
-	var now time.Time
-	if err := transaction.QueryRow(ctx, "SELECT now()").Scan(&now); err != nil {
-		return 0, wrapDriverError(err, "read the database time")
-	}
-	byName, err := registerSchedules(ctx, transaction, schedules, now)
+	now, err := databaseNow(ctx, transaction)
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	due, err := claimDue(ctx, transaction, byName)
+	wasDue, err := registerAndClaim(ctx, transaction, schedule, now)
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	for _, schedule := range due {
+	if wasDue {
 		if err := s.enqueueAndAdvance(ctx, transaction, schedule, now); err != nil {
-			return 0, err
+			return false, err
 		}
 	}
-	return len(due), wrapDriverError(transaction.Commit(ctx), "commit schedules")
+	return wasDue, wrapDriverError(transaction.Commit(ctx), "commit schedule %s", schedule.Name)
 }
 
-func registerSchedules(ctx context.Context, transaction pgx.Tx, schedules []jobs.Schedule, now time.Time) (map[string]jobs.Schedule, error) {
-	byName := make(map[string]jobs.Schedule, len(schedules))
-	for _, schedule := range schedules {
-		byName[schedule.Name] = schedule
-		next, err := nextRun(schedule, now)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, next); err != nil {
-			return nil, wrapDriverError(err, "register schedule %s", schedule.Name)
-		}
-	}
-	return byName, nil
+// databaseNow is the transaction's now(): schedules compute their periods in database time.
+func databaseNow(ctx context.Context, transaction pgx.Tx) (time.Time, error) {
+	var now time.Time
+	err := transaction.QueryRow(ctx, "SELECT now()").Scan(&now)
+	return now, wrapDriverError(err, "read the database time")
 }
 
-func claimDue(ctx context.Context, transaction pgx.Tx, byName map[string]jobs.Schedule) ([]jobs.Schedule, error) {
-	names := make([]string, 0, len(byName))
-	for name := range byName {
-		names = append(names, name)
-	}
-	rows, err := transaction.Query(ctx, claimDueSchedules, names)
+// registerAndClaim registers the schedule unless it has a row and locks the row when it is
+// due and no other worker holds it.
+func registerAndClaim(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) (bool, error) {
+	next, err := nextRun(schedule, now)
 	if err != nil {
-		return nil, wrapDriverError(err, "claim due schedules")
+		return false, err
 	}
-	dueNames, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return nil, wrapDriverError(err, "claim due schedules")
+	if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, next); err != nil {
+		return false, wrapDriverError(err, "register schedule %s", schedule.Name)
 	}
-	due := make([]jobs.Schedule, 0, len(dueNames))
-	for _, name := range dueNames {
-		due = append(due, byName[name])
-	}
-	return due, nil
+	var due bool
+	err = transaction.QueryRow(ctx, claimDueSchedule, schedule.Name).Scan(&due)
+	return due, wrapDriverError(err, "claim schedule %s", schedule.Name)
 }
 
 func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) error {
@@ -246,11 +250,12 @@ func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, sched
 	return nil
 }
 
-// nextRun asks the schedule for its next period and refuses one that is not after now: stored,
-// it would leave the schedule due and enqueue on every poll.
+// nextRun asks the schedule for its next period and refuses one that is not after now in the
+// database's microsecond precision: stored, it would leave the schedule due and enqueue on
+// every poll (a Next one nanosecond after now is stored as now).
 func nextRun(schedule jobs.Schedule, now time.Time) (time.Time, error) {
 	next := schedule.Next(now)
-	if !next.After(now) {
+	if !next.Truncate(time.Microsecond).After(now.Truncate(time.Microsecond)) {
 		return time.Time{}, fmt.Errorf("schedule %s: Next(%s) returned %s, which is not after it", schedule.Name, now.Format(time.RFC3339Nano), next.Format(time.RFC3339Nano))
 	}
 	return next, nil
