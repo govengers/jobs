@@ -36,7 +36,7 @@ func TestDecide(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			claim := &Claim{Lease: Lease{JobID: uuid.New(), Token: uuid.New()}, Attempt: test.attempt, MaxAttempts: 3}
+			claim := &Claim{Lease: Lease{JobID: uuid.New(), Token: uuid.New()}, Attempt: test.attempt, MaximumAttempts: 3}
 
 			finish, result := decide(claim, test.handlerError, test.cause, fixedBackoff)
 
@@ -106,7 +106,7 @@ func TestKindNew(t *testing.T) {
 		Name string `json:"name"`
 	}
 	runAt := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	kind := NewKind[payload]("mail.send", &KindOptions{Queue: "mail", MaxAttempts: 3})
+	kind := NewKind[payload]("mail.send", &KindOptions{Queue: "mail", MaximumAttempts: 3})
 
 	job := kind.New(payload{Name: "ada"}, &EnqueueOptions{RunAt: runAt, UniqueKey: "ada"})
 
@@ -115,7 +115,7 @@ func TestKindNew(t *testing.T) {
 	require.JSONEq(t, `{"name":"ada"}`, string(encoded))
 	require.Equal(t, "mail.send", job.Kind())
 	require.Equal(t, "mail", job.Queue())
-	require.Equal(t, 3, job.MaxAttempts())
+	require.Equal(t, 3, job.MaximumAttempts())
 	require.Equal(t, runAt, job.RunAt())
 	require.Equal(t, "ada", job.UniqueKey())
 	require.Equal(t, "mail.send", kind.Name())
@@ -124,12 +124,12 @@ func TestKindNew(t *testing.T) {
 
 func TestKindDefaultsAndValidation(t *testing.T) {
 	defaulted := NewKind[int]("count", &KindOptions{Queue: "counts"}).New(1, nil)
-	require.Equal(t, DefaultMaxAttempts, defaulted.MaxAttempts())
+	require.Equal(t, DefaultMaximumAttempts, defaulted.MaximumAttempts())
 
 	for _, kind := range []*Kind[int]{
 		NewKind[int]("", &KindOptions{Queue: "counts"}),
 		NewKind[int]("count", nil),
-		NewKind[int]("count", &KindOptions{Queue: "counts", MaxAttempts: -1}),
+		NewKind[int]("count", &KindOptions{Queue: "counts", MaximumAttempts: -1}),
 	} {
 		_, err := kind.New(1, nil).EncodePayload()
 		require.ErrorIs(t, err, ErrInvalidKind)
@@ -137,4 +137,7 @@ func TestKindDefaultsAndValidation(t *testing.T) {
 
 	_, err := NewKind[func()]("function", &KindOptions{Queue: "q"}).New(func() {}, nil).EncodePayload()
 	require.Error(t, err)
+
+	_, err = (&NewJob{}).EncodePayload()
+	require.ErrorIs(t, err, ErrInvalidKind, "a zero NewJob is an invalid kind, not a database error")
 }

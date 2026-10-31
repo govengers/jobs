@@ -28,7 +28,7 @@ Constructors are `New...(options *Options) (*X, error)` and validate at startup.
 ## Wiring order in main
 
 1. `pgxpool.New`; run the goose migrations, one of which executes `postgresadapter.MigrationV1`.
-2. `postgresadapter.NewStore` with the pool and the propagators (`authadapter.Identity()`).
+2. `postgresadapter.New` with the pool and the propagators (`authadapter.Identity()`).
 3. Repositories get the store and enqueue on their transactions.
 4. `jobs.NewWorker` with the store, the consumed queues, `wideeventadapter.NewMiddleware`, the same propagators and `prometheusadapter.New` as Observer.
 5. `jobs.Handle` per kind, with the job controllers' methods.

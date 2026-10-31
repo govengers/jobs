@@ -27,7 +27,7 @@ CREATE TABLE govengers_jobs (
     -- squawk-ignore prefer-bigint-over-int
     attempt          integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
     -- squawk-ignore prefer-bigint-over-int
-    max_attempts     integer NOT NULL CHECK (max_attempts > 0),
+    maximum_attempts     integer NOT NULL CHECK (maximum_attempts > 0),
     unique_key       text,
     lease_token      uuid,
     lease_until      timestamptz,

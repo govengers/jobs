@@ -64,7 +64,7 @@ func run() error {
 	if err := database.Migrate(ctx, pool); err != nil {
 		return err
 	}
-	jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	if err != nil {
 		return err
 	}

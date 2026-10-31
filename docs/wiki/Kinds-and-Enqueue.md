@@ -9,7 +9,7 @@ type WelcomeMailPayload struct {
 
 var WelcomeMailKind = jobs.NewKind[WelcomeMailPayload]("signup.welcome_mail", &jobs.KindOptions{
     Queue:       "mail", // required
-    MaxAttempts: 8,      // zero means 10
+    MaximumAttempts: 8,      // zero means 10
     Backoff:     nil,    // nil means 1 s doubling to 1 h, plus up to 20 % jitter
 })
 ```
@@ -52,4 +52,4 @@ WelcomeMailKind.New(payload, &jobs.EnqueueOptions{
 
 ## Propagated values
 
-`postgresadapter.StoreOptions.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)); an OpenTelemetry propagator carries the trace through `propagation.MapCarrier`.
+`postgresadapter.Options.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)); an OpenTelemetry propagator carries the trace through `propagation.MapCarrier`.

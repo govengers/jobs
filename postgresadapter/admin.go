@@ -38,7 +38,7 @@ type Record struct {
 	Status          jobs.Status
 	RunAt           time.Time
 	Attempt         int
-	MaxAttempts     int
+	MaximumAttempts int
 	UniqueKey       string // empty once the job started (J19)
 	Worker          string // the worker holding the lease while running
 	CancelRequested bool
@@ -56,7 +56,7 @@ type ListFilter struct {
 	Limit  int         // zero means 100, at most 1000
 }
 
-const recordColumns = `id, queue, kind, payload, headers, status, run_at, attempt, max_attempts,
+const recordColumns = `id, queue, kind, payload, headers, status, run_at, attempt, maximum_attempts,
     COALESCE(unique_key, ''), COALESCE(worker, ''), cancel_requested, COALESCE(last_error, ''),
     created_at, updated_at, finished_at`
 
@@ -99,7 +99,7 @@ func (s *Store) List(ctx context.Context, filter *ListFilter) ([]*Record, error)
 func scanRecord(row pgx.CollectableRow) (*Record, error) {
 	record := &Record{}
 	err := row.Scan(&record.ID, &record.Queue, &record.Kind, &record.Payload, &record.Headers, &record.Status,
-		&record.RunAt, &record.Attempt, &record.MaxAttempts, &record.UniqueKey, &record.Worker, &record.CancelRequested,
+		&record.RunAt, &record.Attempt, &record.MaximumAttempts, &record.UniqueKey, &record.Worker, &record.CancelRequested,
 		&record.LastError, &record.CreatedAt, &record.UpdatedAt, &record.FinishedAt)
 	return record, err
 }

@@ -3,7 +3,7 @@
 `postgresadapter.Store` implements `jobs.Store` on PostgreSQL 18 with pgx/v5.
 
 ```go
-jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{
+jobStore, err := postgresadapter.New(&postgresadapter.Options{
     Pool:        pool,                                       // its search_path reaches the tables
     Propagators: []jobs.Propagator{authadapter.Identity()},  // inject at enqueue
 })
@@ -19,7 +19,7 @@ The SQL sets `SET LOCAL` lock and statement timeouts and passes squawk. Later ve
 |--------|---------|
 | `status` | `pending`, `running`, `completed`, `dead`, `cancelled` |
 | `run_at` | not claimed before; retries and snoozes move it |
-| `attempt`, `max_attempts` | attempts started, the limit |
+| `attempt`, `maximum_attempts` | attempts started, the limit |
 | `lease_token`, `lease_until`, `worker` | set while running; every write after the claim matches the token |
 | `unique_key` | coalescing key while the job has not started |
 | `headers` | values of the propagators |

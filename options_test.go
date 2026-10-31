@@ -15,8 +15,8 @@ type storeStub struct{ jobs.Store }
 
 func TestNewWorkerValidatesOptions(t *testing.T) {
 	kind := mailKind(nil)
-	validSchedule := func() *jobs.Schedule {
-		return &jobs.Schedule{Name: "digest", Next: jobs.Every(time.Hour), Job: kind.New(mailPayload{}, nil)}
+	validSchedule := func() jobs.Schedule {
+		return jobs.Schedule{Name: "digest", Next: jobs.Every(time.Hour), Job: kind.New(mailPayload{}, nil)}
 	}
 	tests := map[string]*jobs.WorkerOptions{
 		"nil options":         nil,
@@ -25,14 +25,16 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 		"negative queue":      {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"mail": {Concurrency: -1}}},
 		"lease too short":     {Store: storeStub{}, Queues: map[string]jobs.QueueOptions{"mail": {Lease: time.Millisecond}}},
 		"negative duration":   {Store: storeStub{}, DrainTimeout: -time.Second},
-		"schedule without fn": {Store: storeStub{}, Schedules: []*jobs.Schedule{{Name: "digest", Job: kind.New(mailPayload{}, nil)}}},
-		"schedule twice":      {Store: storeStub{}, Schedules: []*jobs.Schedule{validSchedule(), validSchedule()}},
-		"schedule in the past": {Store: storeStub{}, Schedules: []*jobs.Schedule{{
+		"schedule without fn": {Store: storeStub{}, Schedules: []jobs.Schedule{{Name: "digest", Job: kind.New(mailPayload{}, nil)}}},
+		"schedule twice":      {Store: storeStub{}, Schedules: []jobs.Schedule{validSchedule(), validSchedule()}},
+		"schedule in the past": {Store: storeStub{}, Schedules: []jobs.Schedule{{
 			Name: "digest", Next: func(now time.Time) time.Time { return now }, Job: kind.New(mailPayload{}, nil),
 		}}},
-		"schedule of invalid kind": {Store: storeStub{}, Schedules: []*jobs.Schedule{{
+		"schedule of invalid kind": {Store: storeStub{}, Schedules: []jobs.Schedule{{
 			Name: "digest", Next: jobs.Every(time.Hour), Job: jobs.NewKind[mailPayload]("", nil).New(mailPayload{}, nil),
 		}}},
+		"nil middleware": {Store: storeStub{}, Middleware: []jobs.Middleware{nil}},
+		"nil propagator": {Store: storeStub{}, Propagators: []jobs.Propagator{nil}},
 	}
 	for name, options := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -41,7 +43,7 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 		})
 	}
 
-	worker, err := jobs.NewWorker(&jobs.WorkerOptions{Store: storeStub{}, Schedules: []*jobs.Schedule{validSchedule()}, Queues: map[string]jobs.QueueOptions{"mail": {}}})
+	worker, err := jobs.NewWorker(&jobs.WorkerOptions{Store: storeStub{}, Schedules: []jobs.Schedule{validSchedule()}, Queues: map[string]jobs.QueueOptions{"mail": {}}})
 	require.NoError(t, err)
 	require.NotNil(t, worker)
 }

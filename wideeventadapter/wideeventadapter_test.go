@@ -41,7 +41,7 @@ func (e *recordingEmitter) only(t *testing.T) map[string]any {
 func newClaim() *jobs.Claim {
 	return &jobs.Claim{
 		Lease: jobs.Lease{JobID: uuid.MustParse("019a3b5c-0000-7000-8000-000000000001"), Token: uuid.New()},
-		Queue: "mail", Kind: "mail.send", Attempt: 2, MaxAttempts: 5,
+		Queue: "mail", Kind: "mail.send", Attempt: 2, MaximumAttempts: 5,
 	}
 }
 
@@ -76,7 +76,7 @@ func TestSuccessRecordsTheJobAndLetsLayersAddFields(t *testing.T) {
 	require.Equal(t, "mail", fields[wideeventadapter.KeyJobQueue])
 	require.Equal(t, "mail.send", fields[wideeventadapter.KeyJobKind])
 	require.Equal(t, 2, fields[wideeventadapter.KeyJobAttempt])
-	require.Equal(t, 5, fields[wideeventadapter.KeyJobMaxAttempts])
+	require.Equal(t, 5, fields[wideeventadapter.KeyJobMaximumAttempts])
 	require.Equal(t, "example.com", fields["mail.recipient_domain"])
 	require.Contains(t, fields, wideevent.KeyDuration)
 }

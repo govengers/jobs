@@ -27,7 +27,7 @@ func ExampleNewMiddleware() {
 		wideevent.FromContext(ctx).String("mail.template", "welcome")
 		return nil
 	})
-	claim := &jobs.Claim{Lease: jobs.Lease{JobID: uuid.New()}, Queue: "mail", Kind: "mail.send", Attempt: 1, MaxAttempts: 10}
+	claim := &jobs.Claim{Lease: jobs.Lease{JobID: uuid.New()}, Queue: "mail", Kind: "mail.send", Attempt: 1, MaximumAttempts: 10}
 
 	if err := handler(context.Background(), claim); err != nil {
 		fmt.Println(err)

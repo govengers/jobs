@@ -22,10 +22,10 @@ type RenderPayload struct {
     RenderID uuid.UUID `json:"renderId"`
 }
 
-var RenderKind = jobs.NewKind[RenderPayload]("generation.render", &jobs.KindOptions{Queue: "generation", MaxAttempts: 5})
+var RenderKind = jobs.NewKind[RenderPayload]("generation.render", &jobs.KindOptions{Queue: "generation", MaximumAttempts: 5})
 
 // main: one store, one worker per process.
-jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 worker, err := jobs.NewWorker(&jobs.WorkerOptions{
     Store:  jobStore,
     Queues: map[string]jobs.QueueOptions{"generation": {Concurrency: 3}},
@@ -49,7 +49,7 @@ A handler returns:
 | `nil` | completed |
 | `jobs.Permanent(err)` | dead at once; a retry cannot fix it |
 | `jobs.Snooze(delay)` | pending again after `delay`, the attempt does not count |
-| any other error, a panic | retried after the kind's backoff, dead after `MaxAttempts` |
+| any other error, a panic | retried after the kind's backoff, dead after `MaximumAttempts` |
 
 The tables come from `postgresadapter.MigrationV1`, which you run from one of your goose migrations. Nothing runs DDL at startup.
 

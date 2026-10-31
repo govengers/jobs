@@ -9,7 +9,7 @@ wideEvents, err := wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emit
 worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Middleware: []jobs.Middleware{wideEvents}})
 ```
 
-Every attempt emits one event named `job.<queue>` (LOG-001) with `job.id`, `job.queue`, `job.kind`, `job.attempt`, `job.max_attempts`, the outcome and the error. The event is in the handler's context: services and repositories add to it with `wideevent.FromContext(ctx)` exactly as in a request. A snooze is a success with `job.snoozed`; a permanent failure sets `job.permanent`; a cancelled context records `job.cancel_cause`. A handler panic is recorded and returned as the attempt's error. Put the middleware first, so its event covers the other middleware.
+Every attempt emits one event named `job.<queue>` (LOG-001) with `job.id`, `job.queue`, `job.kind`, `job.attempt`, `job.maximum_attempts`, the outcome and the error. The event is in the handler's context: services and repositories add to it with `wideevent.FromContext(ctx)` exactly as in a request. A snooze is a success with `job.snoozed`; a permanent failure sets `job.permanent`; a cancelled context records `job.cancel_cause`. A handler panic is recorded and returned as the attempt's error. Put the middleware first, so its event covers the other middleware.
 
 ## Metrics
 

@@ -59,11 +59,11 @@ func timingWithDefaults(options *WorkerOptions) (timing, error) {
 	return durations, nil
 }
 
-func validateSchedules(schedules []*Schedule) error {
+func validateSchedules(schedules []Schedule) error {
 	names := make(map[string]bool, len(schedules))
 	now := time.Now()
 	for _, schedule := range schedules {
-		if schedule == nil || schedule.Name == "" || schedule.Next == nil || schedule.Job == nil {
+		if schedule.Name == "" || schedule.Next == nil || schedule.Job == nil {
 			return errors.New("jobs: a schedule needs a name, a Next function and a job")
 		}
 		if names[schedule.Name] {
@@ -75,6 +75,22 @@ func validateSchedules(schedules []*Schedule) error {
 		}
 		if _, err := schedule.Job.EncodePayload(); err != nil {
 			return fmt.Errorf("jobs: schedule %s: %w", schedule.Name, err)
+		}
+	}
+	return nil
+}
+
+// validateCollaborators rejects nil middleware and propagators, which would panic on the
+// first attempt instead of at startup (DES-001).
+func validateCollaborators(options *WorkerOptions) error {
+	for index, middleware := range options.Middleware {
+		if middleware == nil {
+			return fmt.Errorf("jobs: WorkerOptions.Middleware[%d] is nil", index)
+		}
+	}
+	for index, propagator := range options.Propagators {
+		if propagator == nil {
+			return fmt.Errorf("jobs: WorkerOptions.Propagators[%d] is nil", index)
 		}
 	}
 	return nil

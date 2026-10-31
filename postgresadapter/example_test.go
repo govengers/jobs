@@ -26,7 +26,7 @@ func ExampleStore_Enqueue() {
 		return
 	}
 	defer pool.Close()
-	jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	if err != nil {
 		fmt.Println(err)
 		return

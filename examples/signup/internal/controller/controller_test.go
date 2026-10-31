@@ -66,7 +66,7 @@ func newApplication(t *testing.T) *testApplication {
 	pool := postgrestest.New(t)
 	_, err := pool.Exec(t.Context(), database.MigrationUsers)
 	require.NoError(t, err)
-	jobStore, err := postgresadapter.NewStore(&postgresadapter.StoreOptions{Pool: pool})
+	jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	require.NoError(t, err)
 	userRepository, err := repository.NewUserRepository(&repository.UserRepositoryOptions{Pool: pool, JobStore: jobStore})
 	require.NoError(t, err)

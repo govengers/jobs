@@ -73,11 +73,11 @@ func New(t *testing.T) *pgxpool.Pool {
 	schema := randomSchema(t)
 	createSchema(t, schema)
 
-	config, err := pgxpool.ParseConfig(instance.url + "&search_path=" + schema)
+	poolConfiguration, err := pgxpool.ParseConfig(instance.url + "&search_path=" + schema)
 	if err != nil {
 		t.Fatalf("parse the test database URL: %v", err)
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfiguration)
 	if err != nil {
 		t.Fatalf("open the test pool: %v", err)
 	}
