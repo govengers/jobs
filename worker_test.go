@@ -515,3 +515,23 @@ func TestRetentionSweepsCompletedJobs(t *testing.T) {
 		return errors.Is(err, postgresadapter.ErrNotFound)
 	}, waitFor, pollEvery)
 }
+
+func TestRunDueRunsRunnableJobsSynchronously(t *testing.T) {
+	harness := newHarness(t)
+	kind := mailKind(&jobs.KindOptions{Backoff: noBackoff, MaxAttempts: 2})
+	worker := harness.worker(nil)
+	var calls atomic.Int32
+	require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error {
+		if calls.Add(1) == 1 {
+			return errors.New("first attempt fails")
+		}
+		return nil
+	}))
+	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
+
+	attempts, err := worker.RunDue(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+	require.Equal(t, jobs.StatusCompleted, harness.record(id).Status)
+}

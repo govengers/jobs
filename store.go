@@ -51,3 +51,13 @@ type SweepRequest struct {
 	RetainDead      time.Duration // dead jobs are kept this long after they died
 	Limit           int
 }
+
+// QueueDepth is the backlog of one queue at one moment, read at scrape time for metrics
+// (postgresadapter.Store.QueueDepths). It describes the shared table, not one worker.
+type QueueDepth struct {
+	Queue            string
+	Pending          int           // runnable now
+	Scheduled        int           // pending with a run time in the future: retries, snoozes, RunAt
+	Running          int           // leased by any worker
+	OldestPendingAge time.Duration // how long the oldest runnable job has waited; zero without one
+}

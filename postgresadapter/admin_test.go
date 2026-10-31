@@ -3,6 +3,7 @@ package postgresadapter_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -82,4 +83,31 @@ func TestRetryDead(t *testing.T) {
 	require.Equal(t, 0, record.Attempt)
 	require.Nil(t, record.FinishedAt)
 	require.ErrorIs(t, store.Retry(ctx, uuid.New()), postgresadapter.ErrNotFound)
+}
+
+func TestQueueDepths(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, `INSERT INTO govengers_jobs (queue, kind, payload, max_attempts, run_at) VALUES
+        ('mail', 'mail.send', '{}', 1, now() + interval '1 hour'),
+        ('reports', 'report.build', '{}', 1, now() - interval '90 seconds')`)
+	require.NoError(t, err)
+	enqueue(t, store, pool, nil)
+	claimOne(t, store, lease)
+	enqueue(t, store, pool, nil)
+
+	depths, err := store.QueueDepths(ctx)
+
+	require.NoError(t, err)
+	require.Len(t, depths, 2)
+	mail := depths[0]
+	require.Equal(t, "mail", mail.Queue)
+	require.Equal(t, 1, mail.Pending)
+	require.Equal(t, 1, mail.Scheduled)
+	require.Equal(t, 1, mail.Running)
+	require.Less(t, mail.OldestPendingAge, time.Minute)
+	reports := depths[1]
+	require.Equal(t, "reports", reports.Queue)
+	require.Equal(t, 1, reports.Pending)
+	require.InDelta(t, 90, reports.OldestPendingAge.Seconds(), 30)
 }
