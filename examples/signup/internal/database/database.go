@@ -40,5 +40,8 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	return transaction.Commit(ctx)
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit the migration: %w", err)
+	}
+	return nil
 }

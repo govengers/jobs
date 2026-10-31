@@ -5,12 +5,14 @@ import (
 	"errors"
 	"maps"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/jobs"
@@ -215,4 +217,28 @@ func gaugeValue(t *testing.T, registry *prometheus.Registry, name, queue string)
 	}
 	t.Fatalf("no %s{queue=%q}", name, queue)
 	return 0
+}
+
+// sharedDepthSource returns the same slice to every scrape, with spare capacity, like a cache.
+type sharedDepthSource struct{ depths []jobs.QueueDepth }
+
+func (s *sharedDepthSource) QueueDepths(context.Context) ([]jobs.QueueDepth, error) {
+	return s.depths, nil
+}
+
+// Round 2, finding 12: concurrent scrapes never write into the slice a DepthSource returned.
+func TestConcurrentScrapesLeaveTheSourcesSliceAlone(t *testing.T) {
+	shared := make([]jobs.QueueDepth, 1, 4)
+	shared[0] = jobs.QueueDepth{Queue: "mail", Pending: 1}
+	_, registry := newMetrics(t, &prometheusadapter.Options{DepthSource: &sharedDepthSource{depths: shared}, Queues: []string{"mail", "reports", "billing"}})
+	var group sync.WaitGroup
+	for range 8 {
+		group.Go(func() {
+			_, err := registry.Gather()
+			assert.NoError(t, err)
+		})
+	}
+	group.Wait()
+
+	require.Equal(t, []jobs.QueueDepth{{Queue: "mail", Pending: 1}, {}, {}, {}}, shared[:cap(shared)], "the spare capacity of the source's slice was not written")
 }

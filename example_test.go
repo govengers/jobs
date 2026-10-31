@@ -23,7 +23,9 @@ var renderKind = jobs.NewKind[renderPayload]("generation.render", &jobs.KindOpti
 // This example wires a worker in main and enqueues a job inside a transaction, the way a
 // repository does. It needs a database with postgresadapter.MigrationV1 applied.
 func ExampleNewWorker() {
-	ctx := context.Background()
+	// main's context, cancelled on SIGTERM (signal.NotifyContext)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	pool, err := pgxpool.New(ctx, "postgres://localhost/app")
 	if err != nil {
 		fmt.Println(err)
@@ -52,6 +54,14 @@ func ExampleNewWorker() {
 	}
 	group, groupContext := errgroup.WithContext(ctx)
 	group.Go(recovering(func() error { return worker.Run(groupContext) })) // CON-001
+	// Every return below stops the worker and waits for it before the deferred pool.Close runs
+	// (CON-006); in main this is the shutdown after SIGTERM.
+	defer func() {
+		cancel()
+		if err := group.Wait(); err != nil {
+			fmt.Println(err)
+		}
+	}()
 
 	transaction, err := pool.Begin(ctx)
 	if err != nil {
@@ -65,10 +75,6 @@ func ExampleNewWorker() {
 		return
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		fmt.Println(err)
-		return
-	}
-	if err := group.Wait(); err != nil {
 		fmt.Println(err)
 	}
 }

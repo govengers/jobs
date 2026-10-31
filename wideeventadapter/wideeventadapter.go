@@ -7,6 +7,7 @@ package wideeventadapter
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	wideevent "github.com/govengers/wide-event-logger"
 
@@ -24,6 +25,8 @@ const (
 	KeyJobPermanent       = "job.permanent"    // true when the handler marked its failure with jobs.Permanent
 	KeyJobSnoozed         = "job.snoozed"      // the snooze delay when the handler returned jobs.Snooze
 	KeyJobCancelCause     = "job.cancel_cause" // why the attempt's context was cancelled: lease lost, cancelled, shutdown
+	KeyJobResult          = "job.result"       // what the store kept: the jobs.Result the Observer receives
+	KeyJobFinishError     = "job.finish_error" // why the outcome could not be written
 )
 
 // Options configures the middleware.
@@ -35,7 +38,10 @@ type Options struct {
 // job.<queue>. Put it first in jobs.WorkerOptions.Middleware, so the event covers the other
 // middleware. A panic of the handler is recorded as a failure and returned as the attempt's
 // error, so the event is emitted and the worker retries the job like any failed attempt. A
-// snooze is a success with job.snoozed set.
+// snooze is a success with job.snoozed set. In a worker the event is emitted once the outcome
+// is stored, with job.result: an attempt whose outcome was not stored (fenced, finish_failed,
+// lease_lost) is a failure even when its handler succeeded. Called outside a worker, the event
+// is emitted when the handler returns.
 func NewMiddleware(options *Options) (jobs.Middleware, error) {
 	if options == nil || options.Emitter == nil {
 		return nil, errors.New("wideeventadapter: Options.Emitter is required")
@@ -48,7 +54,14 @@ func NewMiddleware(options *Options) (jobs.Middleware, error) {
 				if recovered := recover(); recovered != nil {
 					err = recovery.Error("job "+claim.Lease.JobID.String(), recovered)
 				}
-				finish(ctx, we, err)
+				recordHandler(ctx, we, err)
+				stored := jobs.OnResult(ctx, func(result jobs.Result, writeError error) {
+					recordStored(we, claim, result, writeError)
+					we.Emit()
+				})
+				if !stored {
+					we.Emit()
+				}
 			}()
 			return next(wideevent.NewContext(ctx, we), claim)
 		}
@@ -65,8 +78,8 @@ func begin(emitter wideevent.Emitter, claim *jobs.Claim) *wideevent.Event {
 	return we
 }
 
-// finish records the attempt's outcome and emits the event.
-func finish(ctx context.Context, we *wideevent.Event, err error) {
+// recordHandler records how the handler ended.
+func recordHandler(ctx context.Context, we *wideevent.Event, err error) {
 	if cause := context.Cause(ctx); cause != nil {
 		we.Err(KeyJobCancelCause, cause)
 	}
@@ -79,5 +92,17 @@ func finish(ctx context.Context, we *wideevent.Event, err error) {
 	default:
 		we.Bool(KeyJobPermanent, jobs.IsPermanent(err)).Failure(err)
 	}
-	we.Emit()
+}
+
+// recordStored records what the store kept; an outcome that was not stored makes the attempt a
+// failure, whatever the handler returned.
+func recordStored(we *wideevent.Event, claim *jobs.Claim, result jobs.Result, writeError error) {
+	we.String(KeyJobResult, string(result))
+	if writeError != nil {
+		we.Err(KeyJobFinishError, writeError)
+	}
+	notStored := result == jobs.ResultFenced || result == jobs.ResultFinishFailed || result == jobs.ResultLeaseLost
+	if notStored && !we.HasError() {
+		we.Failure(fmt.Errorf("job %s: the outcome was not stored (%s)", claim.Lease.JobID, result))
+	}
 }

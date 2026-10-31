@@ -160,11 +160,13 @@ func (r *queueRunner) start(ctx context.Context, claim *Claim, claimStarted time
 func (r *queueRunner) attempt(ctx context.Context, claim *Claim) error {
 	registered := r.handlerFor(claim.Kind)
 	started := time.Now()
-	handlerError := r.invoke(ctx, registered.handler, claim)
+	attemptContext, reports := withResultReports(ctx)
+	handlerError := r.invoke(attemptContext, registered.handler, claim)
 	duration := time.Since(started)
 	finish, decided := decideRecovering(claim, handlerError, context.Cause(ctx), registered.backoff)
 	result, writeError := r.writeFinish(ctx, finish, decided)
 	r.forget(claim)
+	reports.report(result, writeError)
 	r.observer.attemptFinished(&Outcome{Claim: claim, Result: result, Duration: duration, Err: errors.Join(handlerError, writeError)})
 	return writeError
 }

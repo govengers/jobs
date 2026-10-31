@@ -20,15 +20,15 @@ type Client struct {
 	writer io.Writer
 }
 
-// ClientOptions configures a Client.
-type ClientOptions struct {
+// Options configures a Client.
+type Options struct {
 	Writer io.Writer // required; receives one JSON line per mail
 }
 
-// NewClient returns a Client.
-func NewClient(options *ClientOptions) (*Client, error) {
+// New returns a Client.
+func New(options *Options) (*Client, error) {
 	if options == nil || options.Writer == nil {
-		return nil, errors.New("mailer: ClientOptions.Writer is required")
+		return nil, errors.New("mailer: Options.Writer is required")
 	}
 	return &Client{writer: options.Writer}, nil
 }

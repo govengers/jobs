@@ -13,18 +13,18 @@ import (
 
 func TestSendWritesOneJSONLinePerMail(t *testing.T) {
 	var output bytes.Buffer
-	client, err := mailer.NewClient(&mailer.ClientOptions{Writer: &output})
+	client, err := mailer.New(&mailer.Options{Writer: &output})
 	require.NoError(t, err)
 
 	require.NoError(t, client.Send(context.Background(), &model.Mail{IdempotencyKey: "welcome-mail:1", To: "ada@example.com"}))
 
 	require.JSONEq(t, `{"IdempotencyKey":"welcome-mail:1","To":"ada@example.com","Subject":"","Body":""}`, output.String())
-	_, err = mailer.NewClient(&mailer.ClientOptions{})
+	_, err = mailer.New(&mailer.Options{})
 	require.Error(t, err)
 }
 
 func TestSendStopsOnACancelledContext(t *testing.T) {
-	client, err := mailer.NewClient(&mailer.ClientOptions{Writer: &bytes.Buffer{}})
+	client, err := mailer.New(&mailer.Options{Writer: &bytes.Buffer{}})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

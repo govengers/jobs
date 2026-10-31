@@ -109,7 +109,7 @@ func wire(pool *pgxpool.Pool, jobStore *postgresadapter.Store, registry *prometh
 	if err != nil {
 		return nil, nil, err
 	}
-	mailClient, err := mailer.NewClient(&mailer.ClientOptions{Writer: os.Stdout})
+	mailClient, err := mailer.New(&mailer.Options{Writer: os.Stdout})
 	if err != nil {
 		return nil, nil, err
 	}
