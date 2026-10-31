@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -126,6 +127,7 @@ func unpackedBinaries() (string, error) {
 	if _, err := os.Stat(filepath.Join(final, "bin", "pg_ctl")); err == nil {
 		return final, nil
 	}
+	defer closeDownloadConnections()
 	scratch, err := os.MkdirTemp("", "govengers-jobs-postgres-unpack-")
 	if err != nil {
 		return "", err
@@ -153,6 +155,15 @@ func unpackedBinaries() (string, error) {
 		}
 	}
 	return final, nil
+}
+
+// closeDownloadConnections closes the keep-alive connection embedded-postgres leaves open after
+// it downloaded the PostgreSQL archive with http.Get (the default transport): its read loop
+// would outlive the tests and fail Main's goroutine-leak check on a cold machine.
+func closeDownloadConnections() {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
 }
 
 func freePort() (uint32, error) {
