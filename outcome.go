@@ -1,8 +1,10 @@
 package jobs
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/govengers/jobs/internal/recovery"
@@ -153,5 +155,47 @@ func storedResult(decided Result, stored Status, writeError error) Result {
 		return ResultCancelled
 	default:
 		return decided
+	}
+}
+
+// resultReportsKey keys the attempt's result callbacks in its context.
+type resultReportsKey struct{}
+
+// resultReports collects the callbacks OnResult registers during one attempt.
+type resultReports struct {
+	mutex     sync.Mutex
+	callbacks []func(result Result, writeError error)
+}
+
+// OnResult registers report to be called once the attempt whose context ctx is has its stored
+// outcome: the Result the worker reports to the Observer, and the finish write's error. Middleware
+// uses it to record what the store kept, which a handler's return cannot tell (a fenced or failed
+// write). report runs after the handler and the middleware returned, once per attempt; a panic in
+// it is dropped. OnResult returns false outside an attempt's context, where nothing calls report.
+func OnResult(ctx context.Context, report func(result Result, writeError error)) bool {
+	reports, ok := ctx.Value(resultReportsKey{}).(*resultReports)
+	if !ok || report == nil {
+		return false
+	}
+	reports.mutex.Lock()
+	defer reports.mutex.Unlock()
+	reports.callbacks = append(reports.callbacks, report)
+	return true
+}
+
+func withResultReports(ctx context.Context) (context.Context, *resultReports) {
+	reports := &resultReports{}
+	return context.WithValue(ctx, resultReportsKey{}, reports), reports
+}
+
+func (r *resultReports) report(result Result, writeError error) {
+	r.mutex.Lock()
+	callbacks := r.callbacks
+	r.mutex.Unlock()
+	for _, callback := range callbacks {
+		func() {
+			defer func() { _ = recover() }() // a broken callback must not stop the worker
+			callback(result, writeError)
+		}()
 	}
 }

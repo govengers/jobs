@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -142,13 +143,26 @@ func stopOrphans() {
 			continue // not ours, or its test binary still runs
 		}
 		if postmaster, err := os.ReadFile(filepath.Join(directory, "runtime", "data", "postmaster.pid")); err == nil { //nolint:gosec // G304: same directory
-			_ = signal(strings.TrimSpace(strings.SplitN(string(postmaster), "\n", 2)[0]), os.Interrupt) // fast shutdown; gone already is fine
+			processID := strings.TrimSpace(strings.SplitN(string(postmaster), "\n", 2)[0])
+			if runsFrom(processID, directory) {
+				_ = signal(processID, os.Interrupt) // fast shutdown; gone already is fine
+			}
 		}
 		_ = os.RemoveAll(directory) // a leftover directory is harmless
 	}
 }
 
 func alive(processID string) bool { return signal(processID, syscall.Signal(0)) == nil }
+
+// runsFrom reports whether the process is still the PostgreSQL of directory: after its
+// postmaster died, the process ID may belong to an unrelated process.
+func runsFrom(processID, directory string) bool {
+	if _, err := strconv.Atoi(processID); err != nil {
+		return false
+	}
+	command, err := exec.Command("ps", "-o", "command=", "-p", processID).Output() //nolint:gosec,noctx // G204: a process ID this harness wrote; ps returns at once
+	return err == nil && strings.Contains(string(command), directory)
+}
 
 func signal(processID string, sent os.Signal) error {
 	number, err := strconv.Atoi(strings.TrimSpace(processID))

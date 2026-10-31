@@ -11,6 +11,8 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Middleware: []jobs.Middle
 
 Every attempt emits one event named `job.<queue>` (LOG-001) with `job.id`, `job.queue`, `job.kind`, `job.attempt`, `job.maximum_attempts`, the outcome and the error. The event is in the handler's context: services and repositories add to it with `wideevent.FromContext(ctx)` exactly as in a request. A snooze is a success with `job.snoozed`; a permanent failure sets `job.permanent`; a cancelled context records `job.cancel_cause`. A handler panic is recorded and returned as the attempt's error. Put the middleware first, so its event covers the other middleware.
 
+In a worker the event is emitted once the outcome is stored, with `job.result` (the result the metrics count) and `job.finish_error` when the write failed: an attempt whose outcome was not stored (`fenced`, `finish_failed`, `lease_lost`) is a failure even when its handler succeeded. Your own middleware can do the same with `jobs.OnResult(ctx, func(result jobs.Result, writeError error))`.
+
 ## Metrics
 
 ```go

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -183,4 +184,16 @@ func TestStoredResult(t *testing.T) {
 			require.Equal(t, test.want, storedResult(test.decided, test.stored, test.writeError))
 		})
 	}
+}
+
+func TestOnResultOutsideAnAttemptRegistersNothing(t *testing.T) {
+	require.False(t, OnResult(context.Background(), func(Result, error) {}))
+
+	ctx, reports := withResultReports(context.Background())
+	require.False(t, OnResult(ctx, nil))
+	var got []Result
+	require.True(t, OnResult(ctx, func(result Result, _ error) { got = append(got, result) }))
+	require.True(t, OnResult(ctx, func(Result, error) { panic("a broken callback") }))
+	require.NotPanics(t, func() { reports.report(ResultFenced, nil) })
+	require.Equal(t, []Result{ResultFenced}, got)
 }

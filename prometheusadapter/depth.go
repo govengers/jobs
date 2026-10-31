@@ -2,6 +2,7 @@ package prometheusadapter
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -74,8 +75,10 @@ func (c *depthCollector) Collect(metrics chan<- prometheus.Metric) {
 	c.failedRead.Collect(metrics)
 }
 
-// withDeclaredQueues adds a zero depth for every declared queue the store did not report.
+// withDeclaredQueues adds a zero depth for every declared queue the store did not report, to a
+// copy: a DepthSource may return a slice it shares between scrapes.
 func (c *depthCollector) withDeclaredQueues(depths []jobs.QueueDepth) []jobs.QueueDepth {
+	depths = slices.Clip(slices.Clone(depths))
 	reported := make(map[string]bool, len(depths))
 	for _, depth := range depths {
 		reported[depth.Queue] = true
