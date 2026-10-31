@@ -65,8 +65,8 @@ SELECT id FROM govengers_jobs WHERE queue = $1 AND unique_key = $2 AND status = 
 // roll back with the caller's change. It returns their IDs in order; a job whose unique key is
 // held by a pending job gets that job's ID instead of a new row.
 //
-// Kinds and payloads are checked before the first insert, so jobs.ErrInvalidKind or a payload
-// that does not encode inserts nothing. A database error after some inserts returns the IDs
+// Propagators, kinds and payloads are checked before the first insert, so a value a propagator
+// cannot carry, jobs.ErrInvalidKind or a payload that does not encode inserts nothing. A database error after some inserts returns the IDs
 // inserted so far with the error: on a transaction they roll back with it, on the pool or a
 // connection they stay. Pass a transaction for all or nothing.
 //
@@ -76,7 +76,9 @@ SELECT id FROM govengers_jobs WHERE queue = $1 AND unique_key = $2 AND status = 
 func (s *Store) Enqueue(ctx context.Context, executor Executor, newJobs ...*jobs.NewJob) ([]uuid.UUID, error) {
 	headers := map[string]string{}
 	for _, propagator := range s.propagators {
-		propagator.Inject(ctx, headers)
+		if err := propagator.Inject(ctx, headers); err != nil {
+			return nil, fmt.Errorf("enqueue: carry the context into the job headers: %w", err)
+		}
 	}
 	payloads, err := encodePayloads(newJobs)
 	if err != nil {

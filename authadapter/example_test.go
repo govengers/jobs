@@ -18,7 +18,10 @@ func ExampleIdentity() {
 	// The request that enqueues the job carries the user's identity.
 	request := auth.WithIdentity(context.Background(), &auth.Identity{Provider: "oidc", Subject: "ada", Username: "ada", Active: true})
 	headers := map[string]string{} // stored with the job
-	propagator.Inject(request, headers)
+	if err := propagator.Inject(request, headers); err != nil {
+		fmt.Println(err) // an identity JSON cannot hold; Enqueue fails with it
+		return
+	}
 
 	// The worker restores it before the handler runs.
 	handlerContext := propagator.Extract(context.Background(), headers)

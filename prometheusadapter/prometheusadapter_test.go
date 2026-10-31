@@ -3,12 +3,14 @@ package prometheusadapter_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/jobs"
@@ -34,9 +36,10 @@ func newMetrics(t *testing.T, options *prometheusadapter.Options) (*prometheusad
 
 func TestNewRejectsIncompleteOptions(t *testing.T) {
 	for name, options := range map[string]*prometheusadapter.Options{
-		"nil options":   nil,
-		"no registerer": {Namespace: "billing"},
-		"no namespace":  {Registerer: prometheus.NewRegistry()},
+		"nil options":            nil,
+		"no registerer":          {Namespace: "billing"},
+		"no namespace":           {Registerer: prometheus.NewRegistry()},
+		"negative depth timeout": {Registerer: prometheus.NewRegistry(), Namespace: "billing", DepthTimeout: -time.Second},
 	} {
 		t.Run(name, func(t *testing.T) {
 			metrics, err := prometheusadapter.New(options)
@@ -79,8 +82,36 @@ billing_jobs_attempts_total{kind="mail.send",queue="mail",result="retried"} 1
 billing_jobs_operations_total{operation="claim",outcome="success"} 1
 billing_jobs_operations_total{operation="rescue",outcome="failure"} 1
 `), "billing_jobs_attempts_total", "billing_jobs_operations_total"))
-	require.Equal(t, 2, testutil.CollectAndCount(registry, "billing_jobs_operation_duration_seconds"))
-	require.Equal(t, 1, testutil.CollectAndCount(registry, "billing_jobs_attempt_duration_seconds"))
+	attemptDurations := histogram(t, registry, "billing_jobs_attempt_duration_seconds", map[string]string{"queue": "mail", "kind": "mail.send"})
+	require.Equal(t, uint64(3), attemptDurations.GetSampleCount(), "every attempt is observed")
+	require.InDelta(t, 2.12, attemptDurations.GetSampleSum(), 0.001)
+	claimDurations := histogram(t, registry, "billing_jobs_operation_duration_seconds", map[string]string{"operation": "claim"})
+	require.Equal(t, uint64(1), claimDurations.GetSampleCount())
+	require.InDelta(t, 0.001, claimDurations.GetSampleSum(), 0.0001)
+	require.Equal(t, uint64(1), histogram(t, registry, "billing_jobs_operation_duration_seconds", map[string]string{"operation": "rescue"}).GetSampleCount())
+}
+
+// histogram returns the histogram of the family with exactly these labels.
+func histogram(t *testing.T, registry *prometheus.Registry, name string, labels map[string]string) *dto.Histogram {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			found := map[string]string{}
+			for _, pair := range metric.GetLabel() {
+				found[pair.GetName()] = pair.GetValue()
+			}
+			if maps.Equal(found, labels) {
+				return metric.GetHistogram()
+			}
+		}
+	}
+	t.Fatalf("no %s%v", name, labels)
+	return nil
 }
 
 func TestAttemptWithAnInvalidLabelIsDroppedInsteadOfPanicking(t *testing.T) {
@@ -130,7 +161,29 @@ func TestFailedDepthReadSkipsTheGaugesAndCountsTheFailure(t *testing.T) {
 		names = append(names, family.GetName())
 	}
 	require.Equal(t, []string{"billing_jobs_depth_errors_total"}, names)
-	require.Equal(t, 1, testutil.CollectAndCount(registry, "billing_jobs_depth_errors_total"))
+	require.Equal(t, 1.0, families[0].GetMetric()[0].GetCounter().GetValue(), "the failed read is counted")
+	families, err = registry.Gather()
+	require.NoError(t, err)
+	require.Equal(t, 2.0, families[0].GetMetric()[0].GetCounter().GetValue(), "every failed scrape counts")
+}
+
+// Finding 23: a failed New leaves nothing registered, so a retry on the same registry works.
+func TestFailedNewLeavesTheRegistryUnchanged(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	// the same descriptor as the adapter's third collector, so its registration is the one that fails
+	squatter := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "billing", Subsystem: "jobs", Name: "operations_total",
+		Help: "Store operations of the job worker by operation and outcome.",
+	}, []string{"operation", "outcome"})
+	require.NoError(t, registry.Register(squatter))
+
+	_, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: "billing"})
+	require.Error(t, err)
+
+	require.True(t, registry.Unregister(squatter))
+	metrics, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: "billing"})
+	require.NoError(t, err, "the collectors of the failed attempt were unregistered")
+	require.NotNil(t, metrics)
 }
 
 // TestMetricsPassTheLinter is MET-007: names, units and help of every collector pass promlint

@@ -172,10 +172,11 @@ type tenantKey struct{}
 
 type tenantPropagator struct{}
 
-func (tenantPropagator) Inject(ctx context.Context, headers map[string]string) {
+func (tenantPropagator) Inject(ctx context.Context, headers map[string]string) error {
 	if tenant, ok := ctx.Value(tenantKey{}).(string); ok {
 		headers["tenant"] = tenant
 	}
+	return nil
 }
 
 func (tenantPropagator) Extract(ctx context.Context, headers map[string]string) context.Context {

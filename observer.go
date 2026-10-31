@@ -46,8 +46,11 @@ type Operation struct {
 
 // Propagator carries request-scoped values from the context that enqueues a job to the
 // context its handler runs in: an identity, a trace. Inject writes them into the job's
-// headers at enqueue; Extract restores them before the handler runs.
+// headers at enqueue and returns an error for a value it cannot carry, which makes the
+// enqueue fail instead of losing the value; a context without the value is no error. Extract
+// restores them before the handler runs, and must leave no value of the worker's own context
+// in place where the headers carry none.
 type Propagator interface {
-	Inject(ctx context.Context, headers map[string]string)
+	Inject(ctx context.Context, headers map[string]string) error
 	Extract(ctx context.Context, headers map[string]string) context.Context
 }
