@@ -165,13 +165,19 @@ type resultReportsKey struct{}
 type resultReports struct {
 	mutex     sync.Mutex
 	callbacks []func(result Result, writeError error)
+	delivered bool // the result was reported; later registrations are refused
 }
 
-// OnResult registers report to be called once the attempt whose context ctx is has its stored
-// outcome: the Result the worker reports to the Observer, and the finish write's error. Middleware
-// uses it to record what the store kept, which a handler's return cannot tell (a fenced or failed
-// write). report runs after the handler and the middleware returned, once per attempt; a panic in
-// it is dropped. OnResult returns false outside an attempt's context, where nothing calls report.
+// OnResult registers report to be called with the stored outcome of the attempt ctx belongs
+// to: the Result the worker reports to the Observer, and the finish write's error. Middleware
+// uses it to record what the store kept, which a handler's return cannot tell (a fenced or
+// failed write).
+//
+// Register while the handler or the middleware runs. Every registered report is called exactly
+// once, in registration order, on the attempt's goroutine, after the handler and the middleware
+// returned and the finish was written, before the attempt's slot is freed and before the
+// Observer; keep it fast. A panic in it is dropped. OnResult returns false, and report is never
+// called, outside an attempt's context, for a nil report and once the result was delivered.
 func OnResult(ctx context.Context, report func(result Result, writeError error)) bool {
 	reports, ok := ctx.Value(resultReportsKey{}).(*resultReports)
 	if !ok || report == nil {
@@ -179,6 +185,9 @@ func OnResult(ctx context.Context, report func(result Result, writeError error))
 	}
 	reports.mutex.Lock()
 	defer reports.mutex.Unlock()
+	if reports.delivered {
+		return false
+	}
 	reports.callbacks = append(reports.callbacks, report)
 	return true
 }
@@ -191,6 +200,7 @@ func withResultReports(ctx context.Context) (context.Context, *resultReports) {
 func (r *resultReports) report(result Result, writeError error) {
 	r.mutex.Lock()
 	callbacks := r.callbacks
+	r.delivered = true
 	r.mutex.Unlock()
 	for _, callback := range callbacks {
 		func() {

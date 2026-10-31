@@ -44,6 +44,10 @@ func TestListFiltersAndPages(t *testing.T) {
 	running, err := store.List(ctx, &postgresadapter.ListFilter{Status: jobs.StatusRunning})
 	require.NoError(t, err)
 	require.Empty(t, running)
+
+	unfiltered, err := store.List(ctx, nil) // round 3, finding 6: nil is the zero filter, not a panic
+	require.NoError(t, err)
+	require.Len(t, unfiltered, 4)
 }
 
 func recordIDs(records []*postgresadapter.Record) []uuid.UUID {

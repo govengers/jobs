@@ -67,6 +67,8 @@ func TestHandleValidates(t *testing.T) {
 	handler := func(context.Context, *jobs.Job[mailPayload]) error { return nil }
 
 	require.ErrorIs(t, jobs.Handle(worker, jobs.NewKind[mailPayload]("mail.send", nil), handler), jobs.ErrInvalidKind)
+	require.ErrorIs(t, jobs.Handle[mailPayload](worker, nil, handler), jobs.ErrInvalidKind, "round 3, finding 6: a nil kind is an error, not a panic")
+	require.Error(t, jobs.Handle(nil, mailKind(nil), handler))
 	require.Error(t, jobs.Handle(worker, mailKind(nil), nil))
 	require.NoError(t, jobs.Handle(worker, mailKind(nil), handler))
 	require.Error(t, jobs.Handle(worker, mailKind(nil), handler), "a second handler for the same kind")

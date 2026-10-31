@@ -8,6 +8,8 @@ govulncheck := "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 coverage_threshold := "80"
 coverage_excluded := "/examples/|/test/|/internal/postgrestest/"
 e2e_inputs := "test/e2e"
+# modules of their own inside the repository: examples whose dependencies the library must not require
+nested_modules := "examples/tracing"
 
 default:
     @just --list
@@ -17,6 +19,7 @@ lint:
     go vet ./...
     go vet -tags e2e ./test/e2e/...
     golangci-lint run ./...
+    for module in {{nested_modules}}; do (cd "$module" && go vet ./... && golangci-lint run ./...); done
 
 # Unit tests of changed and affected packages; the Go test cache replays the rest (TST-014). Fails below the coverage threshold (TST-010)
 test *flags:
@@ -25,6 +28,7 @@ test *flags:
     grep -v -E '{{coverage_excluded}}' sandbox/unit.raw.cover > sandbox/unit.cover
     go tool cover -func=sandbox/unit.cover > sandbox/unit.func
     awk -v threshold={{coverage_threshold}} '/^total:/ { found = 1; sub("%", "", $3); print "coverage " $3 "%"; if ($3 + 0 < threshold) { print "coverage is below " threshold "%"; exit 1 } } END { if (!found) { print "no coverage total"; exit 1 } }' sandbox/unit.func
+    for module in {{nested_modules}}; do (cd "$module" && go test -race {{flags}} ./...); done
 
 # Every unit test, uncached and shuffled: the nightly run and before a release (TST-014, TST-005)
 test-all: (test "-count=1" "-shuffle=on")
@@ -58,6 +62,7 @@ test-e2e: e2e-build
 # Scan for known vulnerabilities in reachable code (TCH-008)
 vulncheck:
     {{govulncheck}} ./...
+    for module in {{nested_modules}}; do (cd "$module" && {{govulncheck}} ./...); done
 
 # Everything CI runs on a change
 check: lint test test-e2e vulncheck

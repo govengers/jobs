@@ -16,7 +16,7 @@ err = jobs.Handle(worker, model.WelcomeMailKind, mailJobController.SendWelcomeMa
 group.Go(recovering(func() error { return worker.Run(ctx) })) // CON-001
 ```
 
-Register every handler before `Run`. A `Worker` runs once.
+Register every handler before `Run`. While `Run` runs, `Run`, `RunDue` and `Handle` fail; after it returned the worker may run again.
 
 ## Queue options
 

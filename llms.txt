@@ -2,7 +2,7 @@
 
 > Durable PostgreSQL work queue for govengers services: typed kinds, enqueue inside the caller's transaction, lease plus heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain and release, adapters for wide events, auth identity and Prometheus.
 
-- Module: `github.com/govengers/jobs` (v1 in development), Go 1.26, PostgreSQL 18, Apache 2.0.
+- Module: `github.com/govengers/jobs`, Go 1.26, PostgreSQL 18, Apache 2.0.
 - Packages: `jobs` (model, outcomes, worker, Store/Observer/Propagator interfaces), `postgresadapter` (Store on pgx/v5, Enqueue, admin operations, QueueDepths, MigrationV1), `wideeventadapter`, `authadapter`, `prometheusadapter`, `jobstest` (Drain).
 - Standards: govengers/standards, `library` profile.
 - Rule of thumb: jobs stay inside one service and its database; delivery is at least once, so handlers are idempotent; a handler is a job controller that calls a service method.
