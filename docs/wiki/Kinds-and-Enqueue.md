@@ -56,7 +56,7 @@ WelcomeMailKind.New(payload, &jobs.EnqueueOptions{
 
 `postgresadapter.Options.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `Inject` returns an error for a value it cannot carry, and `Enqueue` then fails before inserting anything; `Extract` must not let a value of the worker's own context through where the headers carry none. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)).
 
-The module ships no OpenTelemetry propagator; the trace can travel with a few lines in your service (OBS-001). They are compiled and tested in [example_trace_test.go](../../example_trace_test.go):
+The module ships no OpenTelemetry propagator; the trace can travel with a few lines in your service (OBS-001). They are compiled and tested in the module [examples/tracing](../../examples/tracing), a module of its own so the library requires no OpenTelemetry:
 
 ```go
 // tracePropagator carries the W3C trace context (traceparent, tracestate) into the job.

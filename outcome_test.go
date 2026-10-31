@@ -196,4 +196,7 @@ func TestOnResultOutsideAnAttemptRegistersNothing(t *testing.T) {
 	require.True(t, OnResult(ctx, func(Result, error) { panic("a broken callback") }))
 	require.NotPanics(t, func() { reports.report(ResultFenced, nil) })
 	require.Equal(t, []Result{ResultFenced}, got)
+
+	// Round 3, finding 3: a registration after the delivery is refused, never silently dropped.
+	require.False(t, OnResult(ctx, func(Result, error) { t.Error("a late report must not be registered") }))
 }

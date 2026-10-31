@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/stretchr/testify/require"
@@ -35,38 +34,53 @@ func (r *eventRecorder) emitted() []map[string]any {
 	return append([]map[string]any(nil), r.events...)
 }
 
-// Round 2, finding 13: the wide event of an attempt says what the store kept, so a handler that
-// succeeded but whose outcome was not written is logged as a failure.
+// Round 2, finding 13 and round 3, finding 9: the wide event of an attempt says what the store
+// kept, so a handler that succeeded but whose outcome was not stored (a failed write, a fenced
+// finish, a lost lease) is logged as a failure.
 func TestTheWideEventRecordsTheStoredResult(t *testing.T) {
-	for name, finishFails := range map[string]bool{"stored": false, "write failed": true} {
+	tests := map[string]struct {
+		finish      func(context.Context, *jobs.Finish) (jobs.Status, error)
+		loseLease   bool
+		wantResult  jobs.Result
+		wantOutcome string
+	}{
+		"stored": {wantResult: jobs.ResultCompleted, wantOutcome: wideevent.OutcomeSuccess},
+		"write failed": {finish: func(context.Context, *jobs.Finish) (jobs.Status, error) {
+			return "", errors.New("connection reset by peer")
+		}, wantResult: jobs.ResultFinishFailed, wantOutcome: wideevent.OutcomeFailure},
+		"fenced":     {finish: func(context.Context, *jobs.Finish) (jobs.Status, error) { return "", nil }, wantResult: jobs.ResultFenced, wantOutcome: wideevent.OutcomeFailure},
+		"lease lost": {loseLease: true, wantResult: jobs.ResultLeaseLost, wantOutcome: wideevent.OutcomeFailure},
+	}
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			harness := newHarness(t)
 			kind := mailKind(nil)
 			events := &eventRecorder{}
 			middleware, err := wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emitter: events})
 			require.NoError(t, err)
-			store := &faultyStore{Store: harness.store}
-			if finishFails {
-				store.finish = func(context.Context, *jobs.Finish) (jobs.Status, error) {
-					return "", errors.New("connection reset by peer")
+			store := &faultyStore{Store: harness.store, finish: test.finish}
+			worker := harness.worker(&jobs.WorkerOptions{Store: store, Middleware: []jobs.Middleware{middleware}})
+			require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, job *jobs.Job[mailPayload]) error {
+				if test.loseLease {
+					_, err := harness.pool.Exec(context.WithoutCancel(ctx), "UPDATE govengers_jobs SET lease_token = gen_random_uuid() WHERE id = $1", job.ID)
+					if err != nil {
+						return err
+					}
+					<-ctx.Done() // the next heartbeat finds the lease gone
 				}
-			}
-			worker := harness.worker(&jobs.WorkerOptions{Store: store, Middleware: []jobs.Middleware{middleware}, Queues: map[string]jobs.QueueOptions{"mail": {LeaseDuration: time.Minute, PollInterval: pollEvery}}})
-			require.NoError(t, jobs.Handle(worker, kind, func(context.Context, *jobs.Job[mailPayload]) error { return nil }))
+				return nil // the handler itself succeeded
+			}))
 			harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
 
 			harness.run(worker)
 
 			require.Eventually(t, func() bool { return len(events.emitted()) == 1 }, waitFor, pollEvery)
 			event := events.emitted()[0]
-			if finishFails {
-				require.Equal(t, string(jobs.ResultFinishFailed), event[wideeventadapter.KeyJobResult])
-				require.Equal(t, wideevent.OutcomeFailure, event[wideevent.KeyOutcome])
+			require.Equal(t, string(test.wantResult), event[wideeventadapter.KeyJobResult])
+			require.Equal(t, test.wantOutcome, event[wideevent.KeyOutcome])
+			if name == "write failed" {
 				require.Equal(t, "connection reset by peer", event[wideeventadapter.KeyJobFinishError])
-				return
 			}
-			require.Equal(t, string(jobs.ResultCompleted), event[wideeventadapter.KeyJobResult])
-			require.Equal(t, wideevent.OutcomeSuccess, event[wideevent.KeyOutcome])
 		})
 	}
 }

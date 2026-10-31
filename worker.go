@@ -152,6 +152,12 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 // producer and an older worker can run side by side. It returns ErrInvalidKind for an invalid
 // kind and an error for a second handler of the same kind.
 func Handle[P any](worker *Worker, kind *Kind[P], handler func(ctx context.Context, job *Job[P]) error) error {
+	if worker == nil {
+		return errors.New("jobs: Handle needs a worker")
+	}
+	if kind == nil {
+		return fmt.Errorf("%w: nil kind", ErrInvalidKind)
+	}
 	if err := kind.validate(); err != nil {
 		return err
 	}

@@ -78,8 +78,12 @@ WHERE ($1 = '' OR queue = $1) AND ($2 = '' OR status = $2) AND ($3::uuid IS NULL
 ORDER BY id DESC
 LIMIT $4`
 
-// List returns the jobs that match filter, newest first.
+// List returns the jobs that match filter, newest first; a nil filter is the zero filter (every
+// queue and status, the newest 100).
 func (s *Store) List(ctx context.Context, filter *ListFilter) ([]*Record, error) {
+	if filter == nil {
+		filter = &ListFilter{}
+	}
 	limit := defaultListLimit
 	if filter.Limit > 0 {
 		limit = min(filter.Limit, maximumListLimit)
