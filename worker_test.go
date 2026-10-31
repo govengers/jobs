@@ -111,7 +111,7 @@ func (harness *testHarness) run(worker *jobs.Worker) func() {
 	return stop
 }
 
-func (harness *testHarness) enqueue(ctx context.Context, job *jobs.NewJob) uuid.UUID {
+func (harness *testHarness) enqueue(ctx context.Context, job *jobs.PreparedJob) uuid.UUID {
 	harness.t.Helper()
 	ids, err := harness.store.Enqueue(ctx, harness.pool, job)
 	require.NoError(harness.t, err)

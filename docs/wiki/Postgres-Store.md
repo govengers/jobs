@@ -1,6 +1,6 @@
 # Postgres store
 
-`postgresadapter.Store` implements `jobs.Store` on PostgreSQL 18 with pgx/v5.
+`postgresadapter.Store` implements `jobs.Store` on PostgreSQL 18 with pgx/v5. Another store can implement `jobs.Store` too; the interface may gain methods in minor versions, so an implementation outside this module should expect that.
 
 ```go
 jobStore, err := postgresadapter.New(&postgresadapter.Options{

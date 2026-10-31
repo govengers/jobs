@@ -51,4 +51,4 @@ A failed depth query skips the gauges and counts `depth_errors_total`; the rest 
 
 ## Your own Observer
 
-`jobs.Observer` has two methods, `AttemptFinished(*jobs.Outcome)` and `OperationFinished(*jobs.Operation)`, called from several goroutines. Implement it to feed another metrics system, or wrap `prometheusadapter.Metrics` to add your own reactions.
+`jobs.Observer` has two methods, `AttemptFinished(*jobs.Outcome)` and `OperationFinished(*jobs.Operation)`, called from several goroutines. Implement it to feed another metrics system, or wrap `prometheusadapter.Metrics` to add your own reactions. The interface may gain methods in minor versions, so an implementation outside this module should expect that.

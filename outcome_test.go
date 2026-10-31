@@ -145,8 +145,8 @@ func TestKindDefaultsAndValidation(t *testing.T) {
 	_, err := NewKind[func()]("function", &KindOptions{Queue: "q"}).New(func() {}, nil).EncodePayload()
 	require.Error(t, err)
 
-	_, err = (&NewJob{}).EncodePayload()
-	require.ErrorIs(t, err, ErrInvalidKind, "a zero NewJob is an invalid kind, not a database error")
+	_, err = (&PreparedJob{}).EncodePayload()
+	require.ErrorIs(t, err, ErrInvalidKind, "a zero PreparedJob is an invalid kind, not a database error")
 }
 
 func TestPermanentErrorWithoutCauseFormats(t *testing.T) {
