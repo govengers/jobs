@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -154,10 +155,11 @@ type tenantPropagator struct{}
 
 type tenantKey struct{}
 
-func (tenantPropagator) Inject(ctx context.Context, headers map[string]string) {
+func (tenantPropagator) Inject(ctx context.Context, headers map[string]string) error {
 	if tenant, ok := ctx.Value(tenantKey{}).(string); ok {
 		headers["tenant"] = tenant
 	}
+	return nil
 }
 
 func (tenantPropagator) Extract(ctx context.Context, headers map[string]string) context.Context {
@@ -484,4 +486,29 @@ func TestUniqueKeyUnderRepeatableReadIsASerializationFailure(t *testing.T) {
 	_, err = store.Enqueue(ctx, transaction, mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"}))
 
 	require.ErrorIs(t, err, postgresadapter.ErrSerializationFailure)
+}
+
+type failingPropagator struct{}
+
+func (failingPropagator) Inject(context.Context, map[string]string) error {
+	return errors.New("cannot carry the actor")
+}
+
+func (failingPropagator) Extract(ctx context.Context, _ map[string]string) context.Context {
+	return ctx
+}
+
+// Finding 18: a value a propagator cannot carry fails the enqueue; nothing is inserted.
+func TestEnqueueFailsWhenAPropagatorCannotCarryItsValue(t *testing.T) {
+	pool := postgrestest.New(t)
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool, Propagators: []jobs.Propagator{failingPropagator{}}})
+	require.NoError(t, err)
+
+	ids, err := store.Enqueue(context.Background(), pool, mailKind.New(mailPayload{}, nil))
+
+	require.ErrorContains(t, err, "cannot carry the actor")
+	require.Empty(t, ids)
+	records, err := store.List(context.Background(), &postgresadapter.ListFilter{})
+	require.NoError(t, err)
+	require.Empty(t, records)
 }

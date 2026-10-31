@@ -83,10 +83,12 @@ func TestHandlerSideBugsDoNotStopTheWorker(t *testing.T) {
 	harness.run(worker)
 
 	harness.eventuallyStatus(completed, jobs.StatusCompleted)
-	require.Eventually(t, func() bool { return harness.record(retried).Attempt == 1 }, waitFor, pollEvery)
-	record := harness.record(retried)
-	require.Equal(t, jobs.StatusPending, record.Status)
-	require.Contains(t, record.LastError, "panicked: bad backoff")
+	// the claim already sets attempt 1; wait for the retry the worker wrote
+	require.Eventually(t, func() bool {
+		record := harness.record(retried)
+		return record.Status == jobs.StatusPending && record.Attempt == 1
+	}, waitFor, pollEvery)
+	require.Contains(t, harness.record(retried).LastError, "panicked: bad backoff")
 	later := harness.enqueue(context.Background(), plain.New(mailPayload{}, nil))
 	harness.eventuallyStatus(later, jobs.StatusCompleted) // the worker still runs; the cleanup asserts Run returns nil
 }

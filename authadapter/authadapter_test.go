@@ -21,7 +21,7 @@ func TestIdentityTravelsFromEnqueueToHandler(t *testing.T) {
 	}
 	headers := map[string]string{}
 
-	propagator.Inject(auth.WithIdentity(context.Background(), identity), headers)
+	require.NoError(t, propagator.Inject(auth.WithIdentity(context.Background(), identity), headers))
 	restored := auth.IdentityFrom(propagator.Extract(context.Background(), headers))
 
 	require.Contains(t, headers, authadapter.HeaderIdentity)
@@ -33,23 +33,36 @@ func TestNoIdentityStoresNothing(t *testing.T) {
 	propagator := authadapter.Identity()
 	headers := map[string]string{}
 
-	propagator.Inject(context.Background(), headers)
+	require.NoError(t, propagator.Inject(context.Background(), headers))
 
 	require.Empty(t, headers)
 	require.Nil(t, auth.IdentityFrom(propagator.Extract(context.Background(), headers)))
 }
 
-func TestUndecodableHeaderLeavesTheContextWithoutIdentity(t *testing.T) {
-	ctx := authadapter.Identity().Extract(context.Background(), map[string]string{authadapter.HeaderIdentity: "{not json"})
+// Finding 17: a job enqueued without an identity runs without one, even when the worker's own
+// context carries an identity (Run's or RunDue's root context).
+func TestExtractShadowsTheWorkersIdentity(t *testing.T) {
+	administrator := &auth.Identity{Provider: "password", Subject: "root", Roles: []string{auth.RoleAdmin}, Active: true}
+	workerContext := auth.WithIdentity(context.Background(), administrator)
+	for name, headers := range map[string]map[string]string{
+		"no header":          {},
+		"undecodable header": {authadapter.HeaderIdentity: "{not json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := authadapter.Identity().Extract(workerContext, headers)
 
-	require.Nil(t, auth.IdentityFrom(ctx))
+			require.Nil(t, auth.IdentityFrom(ctx))
+		})
+	}
 }
 
-func TestUnencodableIdentityStoresNothing(t *testing.T) {
+// Finding 18: an identity that cannot be carried fails the enqueue instead of vanishing.
+func TestUnencodableIdentityIsAnError(t *testing.T) {
 	identity := &auth.Identity{Provider: "oidc", Subject: "ada", Data: map[string]any{"callback": func() {}}}
 	headers := map[string]string{}
 
-	authadapter.Identity().Inject(auth.WithIdentity(context.Background(), identity), headers)
+	err := authadapter.Identity().Inject(auth.WithIdentity(context.Background(), identity), headers)
 
+	require.ErrorContains(t, err, "oidc:ada")
 	require.Empty(t, headers)
 }

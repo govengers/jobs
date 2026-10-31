@@ -28,7 +28,7 @@ func newDepthCollector(options *Options) *depthCollector {
 		return prometheus.NewDesc(prometheus.BuildFQName(options.Namespace, subsystem, name), help, []string{"queue"}, nil)
 	}
 	timeout := options.DepthTimeout
-	if timeout <= 0 {
+	if timeout == 0 {
 		timeout = DefaultDepthTimeout
 	}
 	return &depthCollector{

@@ -77,17 +77,32 @@ func New(options *Options) (*Metrics, error) {
 	if options.Namespace == "" {
 		return nil, errors.New("prometheusadapter: Namespace is required")
 	}
+	if options.DepthTimeout < 0 {
+		return nil, errors.New("prometheusadapter: DepthTimeout must not be negative")
+	}
 	metrics := newMetrics(options.Namespace)
 	collectors := []prometheus.Collector{metrics.attempts, metrics.attemptDurations, metrics.operations, metrics.operationDurations}
 	if options.DepthSource != nil {
 		collectors = append(collectors, newDepthCollector(options))
 	}
-	for _, collector := range collectors {
-		if err := options.Registerer.Register(collector); err != nil {
-			return nil, fmt.Errorf("prometheusadapter: register the %s_%s metrics: %v", options.Namespace, subsystem, err) //nolint:errorlint // LIB-010: client_golang errors are not part of the API
-		}
+	if err := registerAll(options.Registerer, collectors); err != nil {
+		return nil, fmt.Errorf("prometheusadapter: register the %s_%s metrics: %v", options.Namespace, subsystem, err) //nolint:errorlint // LIB-010: client_golang errors are not part of the API
 	}
 	return metrics, nil
+}
+
+// registerAll registers every collector or none: after a failure it unregisters the ones it
+// registered, so the caller can retry on the same registry.
+func registerAll(registerer prometheus.Registerer, collectors []prometheus.Collector) error {
+	for index, collector := range collectors {
+		if err := registerer.Register(collector); err != nil {
+			for _, registered := range collectors[:index] {
+				registerer.Unregister(registered)
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func newMetrics(namespace string) *Metrics {
