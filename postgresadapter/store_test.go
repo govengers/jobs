@@ -2,6 +2,8 @@ package postgresadapter_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"sync"
 	"testing"
@@ -234,7 +236,6 @@ func TestFinishRetryDelaysAndRecordsTheError(t *testing.T) {
 	store, pool := newStore(t)
 	id := enqueue(t, store, pool, nil)
 	claim := claimOne(t, store, lease)
-	before := time.Now()
 
 	stored, err := store.Finish(context.Background(), &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusPending, Delay: time.Hour, Error: "upstream down"})
 
@@ -244,7 +245,7 @@ func TestFinishRetryDelaysAndRecordsTheError(t *testing.T) {
 	require.Equal(t, jobs.StatusPending, record.Status)
 	require.Equal(t, 1, record.Attempt)
 	require.Equal(t, "upstream down", record.LastError)
-	require.WithinDuration(t, before.Add(time.Hour), record.RunAt, time.Minute)
+	require.InDelta(t, time.Hour.Seconds(), secondsUntil(t, pool, id, "run_at"), 60, "run_at is an hour after the database's now()")
 	require.Nil(t, record.FinishedAt)
 	require.Empty(t, record.Worker)
 }
@@ -282,9 +283,12 @@ func TestExtendLeases(t *testing.T) {
 	held := claimOne(t, store, lease)
 	foreign := jobs.Lease{JobID: held.Lease.JobID, Token: uuid.New()}
 
-	leases, err := store.ExtendLeases(ctx, []jobs.Lease{held.Lease, foreign}, lease)
+	require.InDelta(t, lease.Seconds(), secondsUntil(t, pool, held.Lease.JobID, "lease_until"), 30)
+
+	leases, err := store.ExtendLeases(ctx, []jobs.Lease{held.Lease, foreign}, time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, []jobs.HeldLease{{Lease: held.Lease}}, leases)
+	require.InDelta(t, time.Hour.Seconds(), secondsUntil(t, pool, held.Lease.JobID, "lease_until"), 30, "the extension moved lease_until")
 
 	require.NoError(t, store.Cancel(ctx, held.Lease.JobID))
 	leases, err = store.ExtendLeases(ctx, []jobs.Lease{held.Lease}, lease)
@@ -346,11 +350,15 @@ func TestSweep(t *testing.T) {
 	dead := enqueue(t, store, pool, nil)
 	finish(t, store, jobs.StatusDead)
 	pending := enqueue(t, store, pool, nil)
+	cancelled := enqueue(t, store, pool, &jobs.EnqueueOptions{RunAt: time.Now().Add(time.Hour)})
+	require.NoError(t, store.Cancel(ctx, cancelled))
 
 	deleted, err := store.Sweep(ctx, &jobs.SweepRequest{RetainCompleted: 0, RetainDead: time.Hour, Limit: 100})
 
 	require.NoError(t, err)
-	require.Equal(t, 1, deleted)
+	require.Equal(t, 2, deleted, "the completed and the cancelled job")
+	_, err = store.Get(ctx, cancelled)
+	require.ErrorIs(t, err, postgresadapter.ErrNotFound)
 	_, err = store.Get(ctx, completed)
 	require.ErrorIs(t, err, postgresadapter.ErrNotFound)
 	require.Equal(t, jobs.StatusDead, get(t, store, dead).Status)
@@ -417,4 +425,63 @@ func TestScheduleWithANonFutureNextIsRefused(t *testing.T) {
 	records, err := store.List(ctx, &postgresadapter.ListFilter{})
 	require.NoError(t, err)
 	require.Empty(t, records, "the transaction rolled back")
+}
+
+// secondsUntil reads how far a timestamp column of the job lies after the database's now(), so
+// tests compare database times with database time (TST-005).
+func secondsUntil(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, column string) float64 {
+	t.Helper()
+	var seconds float64
+	require.NoError(t, pool.QueryRow(context.Background(), "SELECT EXTRACT(EPOCH FROM "+column+" - now())::float8 FROM govengers_jobs WHERE id = $1", id).Scan(&seconds))
+	return seconds
+}
+
+type largePayload struct {
+	Data string `json:"data"`
+}
+
+// Finding 19: kinds and payloads are checked before the first insert; a database error later
+// returns the IDs inserted so far.
+func TestEnqueueChecksEveryPayloadBeforeTheFirstInsert(t *testing.T) {
+	store, pool := newStore(t)
+	unencodable := jobs.NewKind[func()]("broken", &jobs.KindOptions{Queue: "mail"}).New(func() {}, nil)
+
+	ids, err := store.Enqueue(context.Background(), pool, mailKind.New(mailPayload{}, nil), unencodable)
+
+	require.Error(t, err)
+	require.Empty(t, ids)
+	records, err := store.List(context.Background(), &postgresadapter.ListFilter{})
+	require.NoError(t, err)
+	require.Empty(t, records, "nothing was inserted")
+}
+
+func TestEnqueueReturnsTheIDsInsertedBeforeADatabaseError(t *testing.T) {
+	store, pool := newStore(t)
+	random := make([]byte, 600_000)
+	_, err := rand.Read(random)
+	require.NoError(t, err)
+	tooLarge := jobs.NewKind[largePayload]("large", &jobs.KindOptions{Queue: "mail"}).New(largePayload{Data: base64.StdEncoding.EncodeToString(random)}, nil)
+
+	ids, err := store.Enqueue(context.Background(), pool, mailKind.New(mailPayload{}, nil), tooLarge)
+
+	require.Error(t, err, "the payload breaks the 256 KiB CHECK")
+	require.Len(t, ids, 1, "on the pool the first job stays inserted")
+	get(t, store, ids[0])
+}
+
+// Finding 20: under REPEATABLE READ a unique key that a concurrent enqueue took is a
+// serialization failure the caller can match and retry.
+func TestUniqueKeyUnderRepeatableReadIsASerializationFailure(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	transaction, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	defer func() { _ = transaction.Rollback(ctx) }() // the failed transaction is aborted anyway
+	var snapshot time.Time
+	require.NoError(t, transaction.QueryRow(ctx, "SELECT now()").Scan(&snapshot))
+	enqueue(t, store, pool, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"})
+
+	_, err = store.Enqueue(ctx, transaction, mailKind.New(mailPayload{}, &jobs.EnqueueOptions{UniqueKey: "sync-tenant-1"}))
+
+	require.ErrorIs(t, err, postgresadapter.ErrSerializationFailure)
 }

@@ -72,6 +72,9 @@ func (harness *testHarness) worker(options *jobs.WorkerOptions) *jobs.Worker {
 	}
 	options.Propagators = []jobs.Propagator{tenantPropagator{}}
 	options.RescueInterval = orDefault(options.RescueInterval, 20*time.Millisecond)
+	// A test's cleanup waits waitFor for Run; a handler that re-runs a rescued job must not
+	// hold the drain longer than that.
+	options.DrainTimeout = orDefault(options.DrainTimeout, 500*time.Millisecond)
 	options.ScheduleInterval = orDefault(options.ScheduleInterval, 20*time.Millisecond)
 	worker, err := jobs.NewWorker(options)
 	require.NoError(harness.t, err)
@@ -303,7 +306,6 @@ func TestRetryWaitsForTheBackoff(t *testing.T) {
 		return errors.New("smtp unavailable")
 	}))
 	id := harness.enqueue(context.Background(), kind.New(mailPayload{}, nil))
-	before := time.Now()
 
 	harness.run(worker)
 
@@ -311,9 +313,10 @@ func TestRetryWaitsForTheBackoff(t *testing.T) {
 		record := harness.record(id)
 		return record.Status == jobs.StatusPending && record.Attempt == 1
 	}, waitFor, pollEvery)
-	record := harness.record(id)
-	require.Equal(t, "smtp unavailable", record.LastError)
-	require.WithinDuration(t, before.Add(time.Hour), record.RunAt, time.Minute)
+	require.Equal(t, "smtp unavailable", harness.record(id).LastError)
+	var secondsUntilRun float64
+	require.NoError(t, harness.pool.QueryRow(context.Background(), "SELECT EXTRACT(EPOCH FROM run_at - now())::float8 FROM govengers_jobs WHERE id = $1", id).Scan(&secondsUntilRun))
+	require.InDelta(t, time.Hour.Seconds(), secondsUntilRun, 60, "run_at is an hour after the database's now() (TST-005)")
 }
 
 func TestDeadAfterTheLastAttempt(t *testing.T) {
@@ -337,12 +340,20 @@ func TestDeadAfterTheLastAttempt(t *testing.T) {
 	require.Equal(t, []jobs.Result{jobs.ResultRetried, jobs.ResultRetried, jobs.ResultDead}, harness.observer.results())
 }
 
-// blockingHandler blocks until its context is done and reports the context's cause.
+// blockingHandler blocks until its context is done and reports the context's cause. It reports
+// only the first run: a rescued job that runs again must not block on a full channel, it would
+// ignore its context and hold the drain.
 func blockingHandler(started chan<- struct{}, causes chan<- error) func(context.Context, *jobs.Job[mailPayload]) error {
 	return func(ctx context.Context, _ *jobs.Job[mailPayload]) error {
-		started <- struct{}{}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
 		<-ctx.Done()
-		causes <- context.Cause(ctx)
+		select {
+		case causes <- context.Cause(ctx):
+		default:
+		}
 		return ctx.Err()
 	}
 }
@@ -404,7 +415,7 @@ func TestShutdownDrainsThenReleasesTheJob(t *testing.T) {
 func TestShutdownLetsARunningHandlerFinish(t *testing.T) {
 	harness := newHarness(t)
 	kind := mailKind(nil)
-	worker := harness.worker(nil)
+	worker := harness.worker(&jobs.WorkerOptions{DrainTimeout: waitFor})
 	started, proceed := make(chan struct{}, 1), make(chan struct{})
 	var cancelledEarly atomic.Bool
 	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, _ *jobs.Job[mailPayload]) error {

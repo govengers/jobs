@@ -2,12 +2,14 @@ package postgresadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/govengers/jobs"
@@ -61,29 +63,49 @@ SELECT id FROM govengers_jobs WHERE queue = $1 AND unique_key = $2 AND status = 
 
 // Enqueue inserts the jobs with executor, usually the caller's transaction, so they commit or
 // roll back with the caller's change. It returns their IDs in order; a job whose unique key is
-// held by a pending job gets that job's ID instead of a new row. It fails with
-// jobs.ErrInvalidKind for a job of an invalid kind.
+// held by a pending job gets that job's ID instead of a new row.
+//
+// Kinds and payloads are checked before the first insert, so jobs.ErrInvalidKind or a payload
+// that does not encode inserts nothing. A database error after some inserts returns the IDs
+// inserted so far with the error: on a transaction they roll back with it, on the pool or a
+// connection they stay. Pass a transaction for all or nothing.
+//
+// A UniqueKey needs READ COMMITTED, PostgreSQL's default. Under REPEATABLE READ or SERIALIZABLE
+// a pending job with the same key that committed after the transaction's snapshot makes the
+// insert fail with ErrSerializationFailure; retry the whole transaction then.
 func (s *Store) Enqueue(ctx context.Context, executor Executor, newJobs ...*jobs.NewJob) ([]uuid.UUID, error) {
 	headers := map[string]string{}
 	for _, propagator := range s.propagators {
 		propagator.Inject(ctx, headers)
 	}
+	payloads, err := encodePayloads(newJobs)
+	if err != nil {
+		return nil, err
+	}
 	ids := make([]uuid.UUID, 0, len(newJobs))
-	for _, job := range newJobs {
-		id, err := insert(ctx, executor, job, headers)
+	for index, job := range newJobs {
+		id, err := insert(ctx, executor, job, payloads[index], headers)
 		if err != nil {
-			return nil, err
+			return ids, err
 		}
 		ids = append(ids, id)
 	}
 	return ids, nil
 }
 
-func insert(ctx context.Context, executor Executor, job *jobs.NewJob, headers map[string]string) (uuid.UUID, error) {
-	payload, err := job.EncodePayload()
-	if err != nil {
-		return uuid.Nil, err
+func encodePayloads(newJobs []*jobs.NewJob) ([]json.RawMessage, error) {
+	payloads := make([]json.RawMessage, len(newJobs))
+	for index, job := range newJobs {
+		payload, err := job.EncodePayload()
+		if err != nil {
+			return nil, err
+		}
+		payloads[index] = payload
 	}
+	return payloads, nil
+}
+
+func insert(ctx context.Context, executor Executor, job *jobs.NewJob, payload json.RawMessage, headers map[string]string) (uuid.UUID, error) {
 	var runAt *time.Time
 	if !job.RunAt().IsZero() {
 		runAt = new(job.RunAt())
@@ -91,6 +113,9 @@ func insert(ctx context.Context, executor Executor, job *jobs.NewJob, headers ma
 	for range uniqueKeyRetries {
 		var id uuid.UUID
 		err := executor.QueryRow(ctx, insertJob, job.Queue(), job.Kind(), payload, headers, runAt, job.MaximumAttempts(), job.UniqueKey()).Scan(&id)
+		if isSerializationFailure(err) {
+			return uuid.Nil, fmt.Errorf("enqueue %s with unique key %q: %w", job.Kind(), job.UniqueKey(), ErrSerializationFailure)
+		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return id, wrapDriverError(err, "enqueue %s", job.Kind())
 		}
@@ -100,6 +125,19 @@ func insert(ctx context.Context, executor Executor, job *jobs.NewJob, headers ma
 		}
 	}
 	return uuid.Nil, fmt.Errorf("enqueue %s: unique key %q kept changing hands", job.Kind(), job.UniqueKey())
+}
+
+// serializationFailure is SQLSTATE 40001.
+const serializationFailure = "40001"
+
+// ErrSerializationFailure is returned by Enqueue when PostgreSQL could not serialize the insert
+// with a concurrent one (a UniqueKey under REPEATABLE READ or SERIALIZABLE); retry the
+// transaction.
+var ErrSerializationFailure = errors.New("postgresadapter: could not serialize the enqueue with a concurrent one")
+
+func isSerializationFailure(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == serializationFailure
 }
 
 // wrapDriverError adds context to a driver error without making the driver's error types part
