@@ -1,5 +1,12 @@
 # jobs
 
+[![CI](https://github.com/govengers/jobs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/govengers/jobs/actions/workflows/ci.yml)
+[![unit tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/govengers/jobs/badges/unit-tests.json)](https://github.com/govengers/jobs/actions/workflows/ci.yml)
+[![e2e tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/govengers/jobs/badges/e2e-tests.json)](test/e2e)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/govengers/jobs/badges/coverage.json)](https://github.com/govengers/jobs/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/govengers/jobs.svg)](https://pkg.go.dev/github.com/govengers/jobs)
+[![License](https://img.shields.io/github/license/govengers/jobs)](LICENSE)
+
 Durable PostgreSQL work queue for govengers services. Module `github.com/govengers/jobs`, Go 1.26, PostgreSQL 18, Apache 2.0.
 
 - **Enqueue inside your transaction.** The job commits or rolls back with the change that caused it: no lost mail after a commit, no mail for a rolled-back sign-up.
