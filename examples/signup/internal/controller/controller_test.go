@@ -149,7 +149,8 @@ func TestAFailedSendIsRetriedLater(t *testing.T) {
 
 func TestWelcomeMailOfAMissingUserIsDead(t *testing.T) {
 	application := newApplication(t)
-	_, err := application.jobStore.Enqueue(t.Context(), application.pool, model.WelcomeMailKind.New(model.WelcomeMailPayload{UserID: uuid.New()}, nil))
+	missing := uuid.New()
+	_, err := application.jobStore.Enqueue(t.Context(), application.pool, model.WelcomeMailKind.New(model.WelcomeMailPayload{UserID: missing}, nil))
 	require.NoError(t, err)
 
 	jobstest.Drain(t, application.worker)
@@ -157,6 +158,7 @@ func TestWelcomeMailOfAMissingUserIsDead(t *testing.T) {
 	record := application.jobs(t)[0]
 	require.Equal(t, jobs.StatusDead, record.Status)
 	require.Equal(t, 1, record.Attempt)
+	require.Contains(t, record.LastError, "get user "+missing.String(), "the repository names the operation and the user (ERR-004)")
 }
 
 func TestADuplicateDeliverySendsNoSecondMail(t *testing.T) {

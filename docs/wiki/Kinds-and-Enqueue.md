@@ -48,8 +48,26 @@ WelcomeMailKind.New(payload, &jobs.EnqueueOptions{
 })
 ```
 
-`UniqueKey` coalesces enqueues while a job with the same queue and key has not started: the second enqueue returns the waiting job's ID. Claiming a job releases its key (J19), so an enqueue while it runs starts another run, which then sees the newer state. It is debouncing, not exactly-once: two runs for one key can still overlap, so the handler stays idempotent.
+`UniqueKey` coalesces enqueues while a job with the same queue and key has not started: the second enqueue returns the waiting job's ID. Claiming a job releases its key (J19), so an enqueue while it runs starts another run, which then sees the newer state. It is debouncing, not exactly-once: two runs for one key can still overlap, so the handler stays idempotent. It needs READ COMMITTED, PostgreSQL's default: under REPEATABLE READ or SERIALIZABLE a concurrent enqueue of the same key fails with `postgresadapter.ErrSerializationFailure`, and the caller retries the transaction.
+
+`Enqueue` checks every propagator, kind and payload before its first insert, so those errors insert nothing. A database error after some inserts returns the IDs inserted so far with the error: kept on the pool or a connection, rolled back on a transaction.
 
 ## Propagated values
 
-`postgresadapter.Options.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)); an OpenTelemetry propagator carries the trace through `propagation.MapCarrier`.
+`postgresadapter.Options.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `Inject` returns an error for a value it cannot carry, and `Enqueue` then fails before inserting anything; `Extract` must not let a value of the worker's own context through where the headers carry none. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)).
+
+The module ships no OpenTelemetry propagator; the trace can travel with a few lines in your service (OBS-001):
+
+```go
+// tracePropagator carries the W3C trace context (traceparent, tracestate) into the job.
+type tracePropagator struct{}
+
+func (tracePropagator) Inject(ctx context.Context, headers map[string]string) error {
+    propagation.TraceContext{}.Inject(ctx, propagation.MapCarrier(headers))
+    return nil
+}
+
+func (tracePropagator) Extract(ctx context.Context, headers map[string]string) context.Context {
+    return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier(headers))
+}
+```

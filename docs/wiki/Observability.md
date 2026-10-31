@@ -25,12 +25,14 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{..., Observer: jobMetrics})
 
 | Metric | Labels |
 |--------|--------|
-| `<ns>_jobs_attempts_total` | queue, kind, result (`completed`, `retried`, `snoozed`, `dead`, `cancelled`, `released`, `lease_lost`, `fenced`) |
+| `<ns>_jobs_attempts_total` | queue, kind, result (`completed`, `retried`, `snoozed`, `dead`, `cancelled`, `released`, `lease_lost`, `fenced`, `finish_failed`) |
 | `<ns>_jobs_attempt_duration_seconds` | queue, kind |
 | `<ns>_jobs_operations_total` | operation (`claim`, `extend_leases`, `finish`, `rescue`, `sweep`, `schedules`), outcome |
 | `<ns>_jobs_operation_duration_seconds` | operation |
 | `<ns>_jobs_pending`, `_scheduled`, `_running`, `_oldest_pending_age_seconds` | queue |
 | `<ns>_jobs_depth_errors_total` | |
+
+The result is what the store wrote, not what the handler asked for: a cancel request that arrived after the last heartbeat turns a retry into `cancelled`, a lease that expired first gives `fenced`, a failed write `finish_failed` (the job stays running until the rescuer returns it). `jobs.Outcome.Err` joins the handler's error with the write's error.
 
 The depth gauges are read from the table at scrape time. They describe the shared table, not the scraped pod, so every replica reports the same value: **aggregate them with `max`, never `sum`**.
 

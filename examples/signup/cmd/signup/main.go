@@ -1,9 +1,16 @@
-// Command signup is the govengers/jobs example service. POST /api/users signs a user up and
-// enqueues the welcome mail in the same transaction; the worker sends it. Run it with
-// DATABASE_URL pointing at an empty PostgreSQL 18 database:
+// Command signup shows how govengers/jobs fits into a service: POST /api/users signs a user up
+// and enqueues the welcome mail in the same transaction, a job controller sends it through the
+// service, the worker reports wide events and Prometheus metrics. It shows the job integration,
+// not a service template: start a service from govengers/standards' templates/service.
+//
+// Three simplifications keep it small, each named where it applies: net/http instead of Gin
+// (the module does not depend on Gin), inline SQL instead of sqlc in the repository, and a
+// self-applied schema instead of goose migrations. Run it with DATABASE_URL pointing at an
+// empty PostgreSQL 18 database:
 //
 //	DATABASE_URL=postgres://localhost/signup go run ./examples/signup/cmd/signup
 //	curl -X POST localhost:8080/api/users -d '{"email":"ada@example.com","name":"Ada"}'
+//	curl localhost:9090/metrics
 package main
 
 import (
@@ -19,6 +26,8 @@ import (
 
 	wideevent "github.com/govengers/wide-event-logger"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/govengers/jobs"
@@ -28,12 +37,14 @@ import (
 	"github.com/govengers/jobs/examples/signup/internal/repository"
 	"github.com/govengers/jobs/examples/signup/internal/service"
 	"github.com/govengers/jobs/postgresadapter"
+	"github.com/govengers/jobs/prometheusadapter"
 	"github.com/govengers/jobs/wideeventadapter"
 )
 
 const (
-	shutdownTimeout = 20 * time.Second
-	defaultAddress  = ":8080"
+	shutdownTimeout       = 20 * time.Second
+	defaultAddress        = ":8080"
+	defaultMetricsAddress = ":9090" // internal listener (MET-001)
 )
 
 func main() {
@@ -51,10 +62,8 @@ func run() error {
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is required")
 	}
-	address := os.Getenv("LISTEN_ADDRESS")
-	if address == "" {
-		address = defaultAddress
-	}
+	address := environment("LISTEN_ADDRESS", defaultAddress)
+	metricsAddress := environment("METRICS_ADDRESS", defaultMetricsAddress)
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -68,20 +77,34 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	worker, router, err := wire(pool, jobStore)
+	registry := prometheus.NewRegistry() // the service's own registry (MET-002)
+	worker, router, err := wire(pool, jobStore, registry)
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	server := newServer(address, router)
+	metricsServer := newServer(metricsAddress, promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 
 	group, groupContext := errgroup.WithContext(ctx)
 	group.Go(recovering(func() error { return worker.Run(groupContext) }))
 	group.Go(recovering(func() error { return serve(groupContext, server) }))
+	group.Go(recovering(func() error { return serve(groupContext, metricsServer) }))
 	return group.Wait()
 }
 
+func environment(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func newServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+}
+
 // wire builds the repository, the mail client, the service, the controllers and the worker.
-func wire(pool *pgxpool.Pool, jobStore *postgresadapter.Store) (*jobs.Worker, *http.ServeMux, error) {
+func wire(pool *pgxpool.Pool, jobStore *postgresadapter.Store, registry *prometheus.Registry) (*jobs.Worker, *http.ServeMux, error) {
 	userRepository, err := repository.NewUserRepository(&repository.UserRepositoryOptions{Pool: pool, JobStore: jobStore})
 	if err != nil {
 		return nil, nil, err
@@ -94,15 +117,7 @@ func wire(pool *pgxpool.Pool, jobStore *postgresadapter.Store) (*jobs.Worker, *h
 	if err != nil {
 		return nil, nil, err
 	}
-	wideEvents, err := wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emitter: wideevent.NewJSONEmitter(&wideevent.JSONEmitterOptions{Writer: os.Stderr})})
-	if err != nil {
-		return nil, nil, err
-	}
-	worker, err := jobs.NewWorker(&jobs.WorkerOptions{
-		Store:      jobStore,
-		Queues:     map[string]jobs.QueueOptions{"mail": {Concurrency: 4}},
-		Middleware: []jobs.Middleware{wideEvents},
-	})
+	worker, err := newWorker(jobStore, registry)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -120,6 +135,25 @@ func wire(pool *pgxpool.Pool, jobStore *postgresadapter.Store) (*jobs.Worker, *h
 	router := http.NewServeMux()
 	userController.Register(router)
 	return worker, router, nil
+}
+
+// newWorker builds the worker with one wide event per attempt and the queue metrics, the
+// depth gauges included.
+func newWorker(jobStore *postgresadapter.Store, registry *prometheus.Registry) (*jobs.Worker, error) {
+	wideEvents, err := wideeventadapter.NewMiddleware(&wideeventadapter.Options{Emitter: wideevent.NewJSONEmitter(&wideevent.JSONEmitterOptions{Writer: os.Stderr})})
+	if err != nil {
+		return nil, err
+	}
+	jobMetrics, err := prometheusadapter.New(&prometheusadapter.Options{Registerer: registry, Namespace: "signup", DepthSource: jobStore, Queues: []string{"mail"}})
+	if err != nil {
+		return nil, err
+	}
+	return jobs.NewWorker(&jobs.WorkerOptions{
+		Store:      jobStore,
+		Queues:     map[string]jobs.QueueOptions{"mail": {Concurrency: 4}},
+		Middleware: []jobs.Middleware{wideEvents},
+		Observer:   jobMetrics,
+	})
 }
 
 // serve runs the server until ctx is cancelled, then waits for running requests (LAY-003).

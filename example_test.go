@@ -51,7 +51,7 @@ func ExampleNewWorker() {
 		return
 	}
 	group, groupContext := errgroup.WithContext(ctx)
-	group.Go(func() error { return worker.Run(groupContext) })
+	group.Go(recovering(func() error { return worker.Run(groupContext) })) // CON-001
 
 	transaction, err := pool.Begin(ctx)
 	if err != nil {
@@ -74,3 +74,15 @@ func ExampleNewWorker() {
 }
 
 func render(context.Context, uuid.UUID) error { return nil }
+
+// recovering turns a panic in work into an error for its errgroup (CON-001).
+func recovering(work func() error) func() error {
+	return func() (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("panic: %v", recovered)
+			}
+		}()
+		return work()
+	}
+}

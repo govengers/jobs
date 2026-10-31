@@ -52,7 +52,7 @@ func (r *UserRepository) Create(ctx context.Context, input *model.SignUpInput) (
 	user, err := scanUser(transaction.QueryRow(ctx,
 		"INSERT INTO users (email, name) VALUES ($1, $2) RETURNING "+userColumns, input.Email, input.Name))
 	if err != nil {
-		return nil, mapError(err)
+		return nil, fmt.Errorf("create user: %w", mapError(err))
 	}
 	welcomeMail := model.WelcomeMailKind.New(model.WelcomeMailPayload{UserID: user.ID}, nil)
 	if _, err := r.jobStore.Enqueue(ctx, transaction, welcomeMail); err != nil {
@@ -68,7 +68,7 @@ func (r *UserRepository) Create(ctx context.Context, input *model.SignUpInput) (
 func (r *UserRepository) Get(ctx context.Context, id uuid.UUID) (*model.User, error) {
 	user, err := scanUser(r.pool.QueryRow(ctx, "SELECT "+userColumns+" FROM users WHERE id = $1", id))
 	if err != nil {
-		return nil, mapError(err)
+		return nil, fmt.Errorf("get user %s: %w", id, mapError(err))
 	}
 	return user, nil
 }
@@ -97,6 +97,6 @@ func mapError(err error) error {
 	case errors.As(err, &postgresError) && postgresError.Code == uniqueViolation:
 		return model.ErrEmailTaken
 	default:
-		return fmt.Errorf("user query: %w", err)
+		return err
 	}
 }

@@ -32,11 +32,11 @@ The SQL sets `SET LOCAL` lock and statement timeouts and passes squawk. Later ve
 | `Get(ctx, id)` | one job as `Record`, or `ErrNotFound` |
 | `List(ctx, &ListFilter{Queue, Status, Before, Limit})` | newest first, keyset pages, at most 1000 |
 | `Cancel(ctx, id)` | pending: cancelled at once; running: cancelled at its next heartbeat; `ErrFinished` otherwise |
-| `Retry(ctx, id)` | a dead job back to pending with its attempts reset; `ErrNotDead` otherwise |
+| `Retry(ctx, id)` | a dead job back to pending, its attempts, last error and any earlier cancellation request reset; `ErrNotDead` otherwise |
 | `QueueDepths(ctx)` | pending, scheduled, running and oldest pending age per queue, for metrics |
 
 Build the admin view of your service on these; the library ships no UI. Guard them with your authorization like any other mutation.
 
 ## Errors
 
-Driver errors are wrapped as text (LIB-010); match only the sentinels: `ErrNotFound`, `ErrFinished`, `ErrNotDead` and `jobs.ErrInvalidKind`.
+Driver errors are wrapped as text (LIB-010); match only the sentinels: `ErrNotFound`, `ErrFinished`, `ErrNotDead`, `ErrSerializationFailure` and `jobs.ErrInvalidKind`.

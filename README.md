@@ -31,7 +31,7 @@ worker, err := jobs.NewWorker(&jobs.WorkerOptions{
     Queues: map[string]jobs.QueueOptions{"generation": {Concurrency: 3}},
 })
 err = jobs.Handle(worker, RenderKind, renderJobController.Render)
-group.Go(func() error { return worker.Run(ctx) }) // drains on cancel
+group.Go(recovering(func() error { return worker.Run(ctx) })) // CON-001's recovering; Run drains on cancel
 
 // repository: in the transaction of the domain change.
 _, err = jobStore.Enqueue(ctx, transaction, RenderKind.New(RenderPayload{RenderID: render.ID}, nil))
