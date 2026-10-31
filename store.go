@@ -3,8 +3,6 @@ package jobs
 import (
 	"context"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Store persists jobs for the Worker; postgresadapter.Store implements it. Every write after
@@ -15,9 +13,10 @@ type Store interface {
 	Claim(ctx context.Context, request *ClaimRequest) ([]*Claim, error)
 	// ExtendLeases extends the given leases by duration and returns those still held.
 	ExtendLeases(ctx context.Context, leases []Lease, duration time.Duration) ([]HeldLease, error)
-	// Finish applies finish if its lease is still held and reports whether it did. A job
-	// whose cancellation was requested goes to cancelled instead of back to pending.
-	Finish(ctx context.Context, finish *Finish) (bool, error)
+	// Finish applies finish if its lease is still held and returns the status the job now has:
+	// a pending result of a job whose cancellation was requested is stored as cancelled. An
+	// empty status means the lease was no longer held and nothing was written.
+	Finish(ctx context.Context, finish *Finish) (Status, error)
 	// Rescue returns up to limit running jobs whose lease expired to pending, or to dead when
 	// their attempts are used up; the lost attempt counts. It returns how many it moved.
 	Rescue(ctx context.Context, limit int) (int, error)
@@ -40,7 +39,7 @@ type ClaimRequest struct {
 
 // HeldLease is a lease ExtendLeases extended.
 type HeldLease struct {
-	JobID uuid.UUID
+	Lease Lease
 	// CancelRequested means the job was cancelled while it runs; the worker cancels the handler.
 	CancelRequested bool
 }

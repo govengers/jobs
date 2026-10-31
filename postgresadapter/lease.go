@@ -2,6 +2,7 @@ package postgresadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -53,7 +54,7 @@ UPDATE govengers_jobs AS job SET
     updated_at = now()
 FROM unnest($1::uuid[], $2::uuid[]) AS lease(job_id, token)
 WHERE job.id = lease.job_id AND job.lease_token = lease.token AND job.status = 'running'
-RETURNING job.id, job.cancel_requested`
+RETURNING job.id, job.lease_token, job.cancel_requested`
 
 // ExtendLeases implements jobs.Store.
 func (s *Store) ExtendLeases(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error) {
@@ -68,7 +69,7 @@ func (s *Store) ExtendLeases(ctx context.Context, leases []jobs.Lease, duration 
 	}
 	held, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (jobs.HeldLease, error) {
 		var lease jobs.HeldLease
-		err := row.Scan(&lease.JobID, &lease.CancelRequested)
+		err := row.Scan(&lease.Lease.JobID, &lease.Lease.Token, &lease.CancelRequested)
 		return lease, err
 	})
 	return held, wrapDriverError(err, "extend %d leases", len(leases))
@@ -87,15 +88,21 @@ UPDATE govengers_jobs SET
     lease_until = NULL,
     worker = NULL,
     updated_at = now()
-WHERE id = $1 AND lease_token = $2 AND status = 'running'`
+WHERE id = $1 AND lease_token = $2 AND status = 'running'
+RETURNING status`
 
 // Finish implements jobs.Store.
-func (s *Store) Finish(ctx context.Context, finish *jobs.Finish) (bool, error) {
-	tag, err := s.pool.Exec(ctx, finishJob, finish.Lease.JobID, finish.Lease.Token, string(finish.Status), finish.Delay.Microseconds(), finish.ReturnAttempt, finish.Error)
-	if err != nil {
-		return false, wrapDriverError(err, "finish job %s as %s", finish.Lease.JobID, finish.Status)
+func (s *Store) Finish(ctx context.Context, finish *jobs.Finish) (jobs.Status, error) {
+	var stored jobs.Status
+	err := s.pool.QueryRow(ctx, finishJob, finish.Lease.JobID, finish.Lease.Token, string(finish.Status), finish.Delay.Microseconds(), finish.ReturnAttempt, finish.Error).Scan(&stored)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", nil // the lease is no longer held
+	case err != nil:
+		return "", wrapDriverError(err, "finish job %s as %s", finish.Lease.JobID, finish.Status)
+	default:
+		return stored, nil
 	}
-	return tag.RowsAffected() == 1, nil
 }
 
 // rescueJobs returns jobs whose lease expired. The attempt the lost lease belonged to counts,

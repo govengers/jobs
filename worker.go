@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/govengers/jobs/internal/recovery"
 )
 
 // Defaults of WorkerOptions and QueueOptions.
@@ -35,6 +37,10 @@ const (
 	sweepBatch         = 1000
 	heartbeatsPerLease = 3
 )
+
+// MaximumRunsPerJob bounds how often RunDue runs one job before it reports a job that never
+// finishes; it is far above the attempts a kind with a zero backoff spends.
+const MaximumRunsPerJob = 100
 
 var errWorkerRunning = errors.New("jobs: the worker is already running")
 
@@ -85,7 +91,7 @@ type Worker struct {
 	queues      map[string]QueueOptions
 	middleware  []Middleware
 	propagators []Propagator
-	observer    Observer
+	observer    guardedObserver
 	schedules   []Schedule
 	timing      timing
 
@@ -132,7 +138,7 @@ func NewWorker(options *WorkerOptions) (*Worker, error) {
 		queues:      queues,
 		middleware:  append([]Middleware(nil), options.Middleware...),
 		propagators: append([]Propagator(nil), options.Propagators...),
-		observer:    observer,
+		observer:    guardedObserver{observer: observer},
 		schedules:   append([]Schedule(nil), options.Schedules...),
 		timing:      durations,
 		handlers:    map[string]registeredHandler{},
@@ -185,8 +191,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		return err
 	}
 	group, groupContext := errgroup.WithContext(ctx)
+	dependencies := w.runnerDependencies(handlers)
 	for queue, options := range w.queues {
-		runner := newQueueRunner(w, queue, options, handlers, group)
+		runner := newQueueRunner(dependencies, queue, options, group)
 		group.Go(recovering(func() error { return runner.run(groupContext) }))
 	}
 	group.Go(recovering(func() error { return w.maintain(groupContext) }))
@@ -196,8 +203,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // RunDue claims and runs every runnable job of the consumed queues, a batch of Concurrency
 // jobs per queue at a time, one job after the other and without heartbeats, until none is
 // left, and returns how many attempts it ran. A retry that waits for its backoff is not
-// runnable. It is meant for tests (jobstest.Drain) and one-off commands, and returns an error
-// while Run runs.
+// runnable. It is meant for tests (jobstest.Drain) and one-off commands. It returns an error
+// while Run runs, when a claim or a finish write fails, and when one job runs
+// MaximumRunsPerJob times (a handler that snoozes without a delay would never let it end).
 func (w *Worker) RunDue(ctx context.Context) (int, error) {
 	w.mutex.Lock()
 	if w.running {
@@ -206,9 +214,11 @@ func (w *Worker) RunDue(ctx context.Context) (int, error) {
 	}
 	handlers := w.wrappedHandlers()
 	w.mutex.Unlock()
+	dependencies := w.runnerDependencies(handlers)
+	runsByJob := map[uuid.UUID]int{}
 	attempts := 0
 	for {
-		ran, err := w.runDueBatches(ctx, handlers)
+		ran, err := w.runDueBatches(ctx, dependencies, runsByJob)
 		attempts += ran
 		if err != nil || ran == 0 {
 			return attempts, err
@@ -217,20 +227,38 @@ func (w *Worker) RunDue(ctx context.Context) (int, error) {
 }
 
 // runDueBatches runs one claimed batch of every queue synchronously.
-func (w *Worker) runDueBatches(ctx context.Context, handlers map[string]registeredHandler) (int, error) {
+func (w *Worker) runDueBatches(ctx context.Context, dependencies runnerDependencies, runsByJob map[uuid.UUID]int) (int, error) {
 	ran := 0
 	for queue, options := range w.queues {
-		runner := newQueueRunner(w, queue, options, handlers, nil)
+		runner := newQueueRunner(dependencies, queue, options, nil)
 		claims, err := runner.claim(ctx, options.Concurrency)
 		if err != nil {
 			return ran, fmt.Errorf("jobs: claim jobs of queue %s: %w", queue, err)
 		}
 		for _, claim := range claims {
-			runner.attempt(ctx, claim)
+			ran++
+			if err := runner.attempt(ctx, claim); err != nil {
+				return ran, fmt.Errorf("jobs: write the outcome of job %s: %w", claim.Lease.JobID, err)
+			}
+			runsByJob[claim.Lease.JobID]++
+			if runsByJob[claim.Lease.JobID] >= MaximumRunsPerJob {
+				return ran, fmt.Errorf("jobs: job %s of kind %s ran %d times in one RunDue; does its handler snooze without a delay?", claim.Lease.JobID, claim.Kind, MaximumRunsPerJob)
+			}
 		}
-		ran += len(claims)
 	}
 	return ran, ctx.Err()
+}
+
+// runnerDependencies hands a queue runner what it needs from the worker.
+func (w *Worker) runnerDependencies(handlers map[string]registeredHandler) runnerDependencies {
+	return runnerDependencies{
+		store:        w.store,
+		observer:     w.observer,
+		propagators:  w.propagators,
+		workerName:   w.name,
+		drainTimeout: w.timing.drainTimeout,
+		handlerFor:   func(kind string) registeredHandler { return w.handlerFor(handlers, kind) },
+	}
 }
 
 // start freezes the handlers and wraps them in the middleware.
@@ -278,7 +306,7 @@ func recovering(work func() error) func() error {
 	return func() (err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("jobs: panic: %v\n%s", recovered, debug.Stack())
+				err = recovery.Error("jobs: a worker goroutine", recovered)
 			}
 		}()
 		return work()
@@ -309,3 +337,18 @@ type silentObserver struct{}
 
 func (silentObserver) AttemptFinished(*Outcome)     {}
 func (silentObserver) OperationFinished(*Operation) {}
+
+// guardedObserver calls the Observer and drops a report whose call panicked: telemetry must
+// not stop the worker or keep an attempt from being written. The observer that panicked
+// cannot be told, so the report is lost.
+type guardedObserver struct{ observer Observer }
+
+func (g guardedObserver) attemptFinished(outcome *Outcome) {
+	defer func() { _ = recover() }() // see the type's comment
+	g.observer.AttemptFinished(outcome)
+}
+
+func (g guardedObserver) operationFinished(operation *Operation) {
+	defer func() { _ = recover() }() // see the type's comment
+	g.observer.OperationFinished(operation)
+}

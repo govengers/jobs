@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/govengers/jobs/internal/recovery"
 )
 
 // Context causes of a handler's cancelled context; read them with context.Cause.
@@ -18,8 +20,12 @@ var (
 // errShutdown is the cause of a handler context cancelled after the drain timeout.
 var errShutdown = errors.New("jobs: worker shut down")
 
-// Permanent marks a handler error that no retry can fix: the job is dead at once.
+// Permanent marks a handler error that no retry can fix: the job is dead at once. Permanent(nil)
+// is nil, so a handler that returns Permanent(err) on a branch where err is nil completes.
 func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
 	return &permanentError{err: err}
 }
 
@@ -31,7 +37,12 @@ func IsPermanent(err error) bool {
 
 type permanentError struct{ err error }
 
-func (e *permanentError) Error() string { return "permanent: " + e.err.Error() }
+func (e *permanentError) Error() string {
+	if e.err == nil {
+		return "permanent"
+	}
+	return "permanent: " + e.err.Error()
+}
 func (e *permanentError) Unwrap() error { return e.err }
 
 // Snooze returns the job to pending for delay without counting the attempt, for a
@@ -67,6 +78,9 @@ const (
 	ResultReleased  Result = "released"   // the worker shut down; the job runs again now, the attempt did not count
 	ResultLeaseLost Result = "lease_lost" // the heartbeat lost the lease; the result was discarded
 	ResultFenced    Result = "fenced"     // the result was not written: the lease had expired before the finish
+	// ResultFinishFailed means the finish write failed: nothing was stored, the job stays running
+	// until its lease expires and the rescuer returns it. Outcome.Err carries the write's error.
+	ResultFinishFailed Result = "finish_failed"
 )
 
 // Finish is the write that ends an attempt. The store applies it only while the lease is
@@ -108,7 +122,36 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 		finish.Status = StatusDead
 		return finish, ResultDead
 	default:
-		finish.Status, finish.Delay = StatusPending, backoff(claim.Attempt)
+		finish.Status, finish.Delay = StatusPending, max(0, backoff(claim.Attempt))
 		return finish, ResultRetried
+	}
+}
+
+// decideRecovering is decide that survives a panic of the kind's Backoff or of the handler
+// error's Error method: the attempt is then a failure retried with DefaultBackoff, so a bug in
+// a kind never stops the worker.
+func decideRecovering(claim *Claim, handlerError, cause error, backoff Backoff) (finish *Finish, result Result) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicError := recovery.Error("deciding the outcome of job "+claim.Lease.JobID.String(), recovered)
+			finish, result = decide(claim, panicError, cause, DefaultBackoff)
+		}
+	}()
+	return decide(claim, handlerError, cause, backoff)
+}
+
+// storedResult maps the decided result to what the store wrote: nothing when the write failed,
+// nothing when the lease was gone, cancelled when a cancellation request turned a pending
+// result into cancelled.
+func storedResult(decided Result, stored Status, writeError error) Result {
+	switch {
+	case writeError != nil:
+		return ResultFinishFailed
+	case stored == "":
+		return ResultFenced
+	case stored == StatusCancelled:
+		return ResultCancelled
+	default:
+		return decided
 	}
 }

@@ -71,6 +71,6 @@ func (w *Worker) observe(ctx context.Context, name OperationName, operation func
 	defer cancel()
 	started := time.Now()
 	count, err := operation(operationContext)
-	w.observer.OperationFinished(&Operation{Name: name, Count: count, Duration: time.Since(started), Err: err})
+	w.observer.operationFinished(&Operation{Name: name, Count: count, Duration: time.Since(started), Err: err})
 	return count, err
 }
