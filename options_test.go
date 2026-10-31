@@ -46,6 +46,13 @@ func TestNewWorkerValidatesOptions(t *testing.T) {
 	worker, err := jobs.NewWorker(&jobs.WorkerOptions{Store: storeStub{}, Schedules: []jobs.Schedule{validSchedule()}, Queues: map[string]jobs.QueueOptions{"mail": {}}})
 	require.NoError(t, err)
 	require.NotNil(t, worker)
+
+	// Finding 22: a nil location is UTC, not a panic inside NewWorker's validation.
+	nilLocation := jobs.Schedule{Name: "nightly", Next: jobs.DailyAt(3, 0, nil), Job: kind.New(mailPayload{}, nil)}
+	require.NotPanics(t, func() {
+		_, err = jobs.NewWorker(&jobs.WorkerOptions{Store: storeStub{}, Schedules: []jobs.Schedule{nilLocation}})
+	})
+	require.NoError(t, err)
 }
 
 func TestHandleValidates(t *testing.T) {

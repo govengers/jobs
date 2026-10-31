@@ -400,3 +400,21 @@ func TestSchedulesEnqueueOncePerPeriodAcrossWorkers(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, "SELECT bool_or(next_run_at <= now()) FROM govengers_job_schedules").Scan(&dueAgain))
 	require.False(t, dueAgain, "both schedules wait for their next period")
 }
+
+// Finding 7: a Next that does not move forward fails the transaction instead of storing a
+// schedule that stays due.
+func TestScheduleWithANonFutureNextIsRefused(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('stuck', now() - interval '1 minute')")
+	require.NoError(t, err)
+	stuck := jobs.Schedule{Name: "stuck", Next: func(now time.Time) time.Time { return now.Add(-time.Hour) }, Job: mailKind.New(mailPayload{}, nil)}
+
+	enqueued, err := store.EnqueueDueSchedules(ctx, []jobs.Schedule{stuck})
+
+	require.ErrorContains(t, err, "schedule stuck")
+	require.Zero(t, enqueued)
+	records, err := store.List(ctx, &postgresadapter.ListFilter{})
+	require.NoError(t, err)
+	require.Empty(t, records, "the transaction rolled back")
+}
