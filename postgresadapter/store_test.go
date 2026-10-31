@@ -49,7 +49,7 @@ func enqueue(t *testing.T, store *postgresadapter.Store, pool *pgxpool.Pool, opt
 
 func claimOne(t *testing.T, store *postgresadapter.Store, duration time.Duration) *jobs.Claim {
 	t.Helper()
-	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 1, Lease: duration, Worker: "test"})
+	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 1, LeaseDuration: duration, Worker: "test"})
 	require.NoError(t, err)
 	require.Len(t, claims, 1)
 	return claims[0]
@@ -133,7 +133,7 @@ func TestEnqueueRunAtDelaysTheClaim(t *testing.T) {
 	store, pool := newStore(t)
 	enqueue(t, store, pool, &jobs.EnqueueOptions{RunAt: time.Now().Add(time.Hour)})
 
-	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 10, Lease: lease, Worker: "test"})
+	claims, err := store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "mail", Limit: 10, LeaseDuration: lease, Worker: "test"})
 
 	require.NoError(t, err)
 	require.Empty(t, claims)
@@ -190,7 +190,7 @@ func TestConcurrentClaimsNeverShareAJob(t *testing.T) {
 	for worker := range 4 {
 		group.Go(func() error {
 			for {
-				claims, err := store.Claim(ctx, &jobs.ClaimRequest{Queue: "mail", Limit: 3, Lease: lease, Worker: fmt.Sprintf("worker-%d", worker)})
+				claims, err := store.Claim(ctx, &jobs.ClaimRequest{Queue: "mail", Limit: 3, LeaseDuration: lease, Worker: fmt.Sprintf("worker-%d", worker)})
 				if err != nil || len(claims) == 0 {
 					return err
 				}

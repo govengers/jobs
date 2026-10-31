@@ -20,7 +20,7 @@ import (
 // Defaults of WorkerOptions and QueueOptions.
 const (
 	DefaultConcurrency      = 1
-	DefaultLease            = 30 * time.Second
+	DefaultLeaseDuration    = 30 * time.Second
 	DefaultPollInterval     = time.Second
 	DefaultDrainTimeout     = 20 * time.Second
 	DefaultRescueInterval   = 30 * time.Second
@@ -76,10 +76,11 @@ type WorkerOptions struct {
 // QueueOptions configures one consumed queue.
 type QueueOptions struct {
 	Concurrency int // jobs of this queue running at once in this worker
-	// Lease is how long a claim holds a job without a heartbeat; the worker extends it every
-	// Lease/3 while the handler runs, so it does not depend on how long a job takes.
-	Lease        time.Duration
-	PollInterval time.Duration // how long an idle queue waits before it looks for jobs again
+	// LeaseDuration is how long a claim holds a job without a heartbeat; the worker extends the
+	// lease every LeaseDuration/3 while the handler runs, so it does not depend on how long a job
+	// takes. (A Lease is the claim itself: a job ID and a token.)
+	LeaseDuration time.Duration
+	PollInterval  time.Duration // how long an idle queue waits before it looks for jobs again
 }
 
 // Worker claims jobs of its queues, runs their handlers and writes the outcome, and keeps the
@@ -185,12 +186,14 @@ func (w *Worker) register(kind string, handler registeredHandler) error {
 
 // Run consumes the worker's queues and runs the maintenance until ctx is cancelled, then
 // drains (J10) and returns nil. It returns an error when a goroutine of the worker panicked;
-// panics of handlers are failed attempts, not errors of Run. A Worker runs once.
+// panics of handlers are failed attempts, not errors of Run. Run, RunDue and Handle fail while
+// Run runs; after Run returned the worker may run again.
 func (w *Worker) Run(ctx context.Context) error {
 	handlers, err := w.start()
 	if err != nil {
 		return err
 	}
+	defer w.stop()
 	group, groupContext := errgroup.WithContext(ctx)
 	dependencies := w.runnerDependencies(handlers)
 	for queue, options := range w.queues {
@@ -231,6 +234,9 @@ func (w *Worker) RunDue(ctx context.Context) (int, error) {
 func (w *Worker) runDueBatches(ctx context.Context, dependencies runnerDependencies, runsByJob map[uuid.UUID]int) (int, error) {
 	ran := 0
 	for queue, options := range w.queues {
+		if err := ctx.Err(); err != nil {
+			return ran, err // J38: no claim after the cancel
+		}
 		runner := newQueueRunner(dependencies, queue, options, nil)
 		claims, err := runner.claim(ctx, options.Concurrency)
 		if err != nil {
@@ -271,6 +277,13 @@ func (w *Worker) start() (map[string]registeredHandler, error) {
 	}
 	w.running = true
 	return w.wrappedHandlers(), nil
+}
+
+// stop marks the worker as no longer running, once Run returns.
+func (w *Worker) stop() {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.running = false
 }
 
 // wrappedHandlers wraps every registered handler in the middleware; the caller holds the mutex.

@@ -27,11 +27,18 @@ func TestPollStartsNoClaimAfterTheCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	for range 64 {
-		runner := newQueueRunner(runnerDependencies{store: store, observer: guardedObserver{observer: silentObserver{}}}, "mail", QueueOptions{Concurrency: 1, Lease: time.Second, PollInterval: time.Second}, nil)
+		runner := newQueueRunner(runnerDependencies{store: store, observer: guardedObserver{observer: silentObserver{}}}, "mail", QueueOptions{Concurrency: 1, LeaseDuration: time.Second, PollInterval: time.Second}, nil)
 		runner.released <- struct{}{}
 
 		runner.poll(ctx)
 	}
 
 	require.Zero(t, store.claims.Load())
+}
+
+// Round 2, finding 3: the heartbeat runs three times per lease (J7).
+func TestTheHeartbeatRunsThreeTimesPerLease(t *testing.T) {
+	runner := newQueueRunner(runnerDependencies{}, "mail", QueueOptions{Concurrency: 1, LeaseDuration: 300 * time.Millisecond}, nil)
+
+	require.Equal(t, 100*time.Millisecond, runner.heartbeatInterval())
 }

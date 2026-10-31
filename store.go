@@ -31,10 +31,10 @@ type Store interface {
 
 // ClaimRequest asks the store for runnable jobs of one queue.
 type ClaimRequest struct {
-	Queue  string
-	Limit  int
-	Lease  time.Duration
-	Worker string // recorded with the job for diagnostics
+	Queue         string
+	Limit         int
+	LeaseDuration time.Duration
+	Worker        string // recorded with the job for diagnostics
 }
 
 // HeldLease is a lease ExtendLeases extended.

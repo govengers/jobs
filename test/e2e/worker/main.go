@@ -84,7 +84,7 @@ func newWorker(pool *pgxpool.Pool, name string, durations timing) (*jobs.Worker,
 	worker, err := jobs.NewWorker(&jobs.WorkerOptions{
 		Store:            store,
 		Name:             name,
-		Queues:           map[string]jobs.QueueOptions{contract.Queue: {Concurrency: 4, Lease: durations.lease, PollInterval: 50 * time.Millisecond}},
+		Queues:           map[string]jobs.QueueOptions{contract.Queue: {Concurrency: 4, LeaseDuration: durations.lease, PollInterval: 50 * time.Millisecond}},
 		DrainTimeout:     durations.drainTimeout,
 		RescueInterval:   200 * time.Millisecond,
 		ScheduleInterval: 100 * time.Millisecond,
