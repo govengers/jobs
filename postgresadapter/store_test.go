@@ -612,7 +612,8 @@ func TestABlockedScheduleFailsFastAndTheNextOneEnqueues(t *testing.T) {
 	require.True(t, enqueued)
 }
 
-// Round 3, finding 7: every error of a schedule names it, the database time included.
+// Round 3, finding 7: every error of a schedule passes the one wrapper that names it; here the
+// transaction's begin fails (a cancelled context never reaches the database time).
 func TestScheduleErrorsNameTheSchedule(t *testing.T) {
 	store, _ := newStore(t)
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -621,4 +622,33 @@ func TestScheduleErrorsNameTheSchedule(t *testing.T) {
 	_, err := store.EnqueueDueSchedule(cancelled, jobs.Schedule{Name: "nightly", Next: jobs.Every(time.Hour), Job: mailKind.New(mailPayload{}, nil)})
 
 	require.ErrorContains(t, err, "schedule nightly")
+}
+
+// Round 4, finding 4: a check calls the schedule's Next once, for the registration and the
+// advance alike.
+func TestAScheduleCheckCallsNextOnce(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	_, err := pool.Exec(ctx, "INSERT INTO govengers_job_schedules (name, next_run_at) VALUES ('due', now() - interval '1 minute')")
+	require.NoError(t, err)
+	for _, name := range []string{"due", "new"} {
+		calls := 0
+		schedule := jobs.Schedule{Name: name, Next: func(now time.Time) time.Time { calls++; return now.Add(time.Hour) }, Job: mailKind.New(mailPayload{}, nil)}
+
+		_, err := store.EnqueueDueSchedule(ctx, schedule)
+
+		require.NoError(t, err)
+		require.Equal(t, 1, calls, "schedule %s", name)
+	}
+}
+
+// Round 4, finding 1: the store turns a panicking Next into the schedule's error.
+func TestAPanickingNextIsTheSchedulesError(t *testing.T) {
+	store, _ := newStore(t)
+	broken := jobs.Schedule{Name: "broken", Next: func(time.Time) time.Time { panic("bad next") }, Job: mailKind.New(mailPayload{}, nil)}
+
+	_, err := store.EnqueueDueSchedule(context.Background(), broken)
+
+	require.ErrorContains(t, err, "schedule broken")
+	require.ErrorContains(t, err, "Next panicked: bad next")
 }

@@ -12,4 +12,5 @@
 - **`UniqueKey` needs READ COMMITTED.** A repository transaction at REPEATABLE READ gets `ErrSerializationFailure` for a concurrent enqueue of the same key; retry the transaction.
 - **Identity snapshots are old.** A job runs with the identity of the moment it was enqueued. Check revocable permissions again in the handler.
 - **`RunDue` is not a worker.** It runs without heartbeats; a test handler that blocks longer than the lease loses its job to the rescuer of another worker sharing the database.
+- **Size the pool for the worker too.** The heartbeat, the finish writes, claims, rescue, sweep and every schedule check use the store's pool, the same pool the handlers use. A pool whose `MaxConns` (pgxpool's default is `max(4, NumCPU)`) only covers the handlers' summed `Concurrency` starves the heartbeat: after one lease without a confirmed extension the self-fence cancels the running handlers with `ErrLeaseLost`. Give `MaxConns` room for the handlers, the HTTP side and a few worker connections, or give the store a pool of its own.
 - **One worker per process and queue set.** Two workers in one process with the same queues work, but double the polling for nothing.

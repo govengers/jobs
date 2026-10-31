@@ -175,8 +175,9 @@ type resultReports struct {
 //
 // Register while the handler or the middleware runs. Every registered report is called exactly
 // once, in registration order, on the attempt's goroutine, after the handler and the middleware
-// returned and the finish was written, before the attempt's slot is freed and before the
-// Observer; keep it fast. A panic in it is dropped. OnResult returns false, and report is never
+// returned and the finish was written: after the Observer's OperationFinished for that finish
+// write, before its AttemptFinished for the attempt and before the attempt's slot is freed.
+// Keep it fast. A panic in it is dropped. OnResult returns false, and report is never
 // called, outside an attempt's context, for a nil report and once the result was delivered.
 func OnResult(ctx context.Context, report func(result Result, writeError error)) bool {
 	reports, ok := ctx.Value(resultReportsKey{}).(*resultReports)

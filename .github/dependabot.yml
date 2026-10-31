@@ -3,7 +3,7 @@
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories: ["/", "/examples/tracing"]
     schedule:
       interval: weekly
   - package-ecosystem: github-actions

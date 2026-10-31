@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/govengers/jobs"
+	"github.com/govengers/jobs/internal/recovery"
 )
 
 // Durations travel as microseconds: "$n::bigint * interval '1 microsecond'".
@@ -199,12 +200,16 @@ func (s *Store) enqueueIfDue(ctx context.Context, schedule jobs.Schedule) (bool,
 	if err != nil {
 		return false, err
 	}
-	wasDue, err := registerAndClaim(ctx, transaction, schedule, now)
+	next, err := nextRun(schedule, now) // once per check: registration and advance use the same period
+	if err != nil {
+		return false, err
+	}
+	wasDue, err := registerAndClaim(ctx, transaction, schedule.Name, next)
 	if err != nil {
 		return false, err
 	}
 	if wasDue {
-		if err := s.enqueueAndAdvance(ctx, transaction, schedule, now); err != nil {
+		if err := s.enqueueAndAdvance(ctx, transaction, schedule, next); err != nil {
 			return false, err
 		}
 	}
@@ -218,28 +223,20 @@ func databaseNow(ctx context.Context, transaction pgx.Tx) (time.Time, error) {
 	return now, wrapDriverError(err, "read the database time")
 }
 
-// registerAndClaim registers the schedule unless it has a row and locks the row when it is
-// due and no other worker holds it.
-func registerAndClaim(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) (bool, error) {
-	next, err := nextRun(schedule, now)
-	if err != nil {
-		return false, err
-	}
-	if _, err := transaction.Exec(ctx, registerSchedule, schedule.Name, next); err != nil {
+// registerAndClaim registers the schedule with next unless it has a row, and locks the row
+// when it is due and no other worker holds it.
+func registerAndClaim(ctx context.Context, transaction pgx.Tx, name string, next time.Time) (bool, error) {
+	if _, err := transaction.Exec(ctx, registerSchedule, name, next); err != nil {
 		return false, wrapDriverError(err, "register")
 	}
 	var due bool
-	err = transaction.QueryRow(ctx, claimDueSchedule, schedule.Name).Scan(&due)
+	err := transaction.QueryRow(ctx, claimDueSchedule, name).Scan(&due)
 	return due, wrapDriverError(err, "claim")
 }
 
-func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, now time.Time) error {
+func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, schedule jobs.Schedule, next time.Time) error {
 	if _, err := s.Enqueue(ctx, transaction, schedule.Job); err != nil {
 		return fmt.Errorf("enqueue: %w", err)
-	}
-	next, err := nextRun(schedule, now)
-	if err != nil {
-		return err
 	}
 	if _, err := transaction.Exec(ctx, advanceSchedule, schedule.Name, next); err != nil {
 		return wrapDriverError(err, "advance")
@@ -249,9 +246,15 @@ func (s *Store) enqueueAndAdvance(ctx context.Context, transaction pgx.Tx, sched
 
 // nextRun asks the schedule for its next period and refuses one that is not after now in the
 // database's microsecond precision: stored, it would leave the schedule due and enqueue on
-// every poll (a Next one nanosecond after now is stored as now).
-func nextRun(schedule jobs.Schedule, now time.Time) (time.Time, error) {
-	next := schedule.Next(now)
+// every poll (a Next one nanosecond after now is stored as now). A Next that panics is an error
+// of this schedule; any other panic of the store still ends the worker's Run (J35).
+func nextRun(schedule jobs.Schedule, now time.Time) (next time.Time, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			next, err = time.Time{}, recovery.Error("Next", recovered)
+		}
+	}()
+	next = schedule.Next(now)
 	if !next.Truncate(time.Microsecond).After(now.Truncate(time.Microsecond)) {
 		return time.Time{}, fmt.Errorf("Next(%s) returned %s, which is not after it", now.Format(time.RFC3339Nano), next.Format(time.RFC3339Nano))
 	}

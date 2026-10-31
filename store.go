@@ -26,7 +26,8 @@ type Store interface {
 	// EnqueueDueSchedule registers the schedule unless it has a row and, when it is due and no
 	// other worker holds its row, enqueues its job and advances it, in one transaction. It
 	// reports whether it enqueued. A row another worker holds is skipped, never waited for;
-	// errors name the schedule.
+	// errors name the schedule. It calls the schedule's Next once and returns a panic of Next as
+	// the schedule's error.
 	EnqueueDueSchedule(ctx context.Context, schedule Schedule) (bool, error)
 }
 
