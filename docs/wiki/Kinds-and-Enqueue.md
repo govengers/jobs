@@ -56,21 +56,4 @@ WelcomeMailKind.New(payload, &jobs.EnqueueOptions{
 
 `postgresadapter.Options.Propagators` write values of the enqueuing context into the job's headers; the worker's `Propagators` restore them before the handler runs. Configure the same propagators on both sides. `Inject` returns an error for a value it cannot carry, and `Enqueue` then fails before inserting anything; `Extract` must not let a value of the worker's own context through where the headers carry none. `authadapter.Identity()` carries the acting user ([Observability](Observability.md#identity)).
 
-The module ships no OpenTelemetry propagator; the trace can travel with a few lines in your service (OBS-001). They are compiled and tested in the module [examples/tracing](../../examples/tracing), a module of its own so the library requires no OpenTelemetry:
-
-```go
-// tracePropagator carries the W3C trace context (traceparent, tracestate) into the job.
-type tracePropagator struct{}
-
-func (tracePropagator) Inject(ctx context.Context, headers map[string]string) error {
-    propagation.TraceContext{}.Inject(ctx, propagation.MapCarrier(headers))
-    return nil
-}
-
-// Extract first removes the worker's own span: TraceContext.Extract returns its input when the
-// headers carry no valid trace, and a job enqueued without one must not join the worker's trace.
-func (tracePropagator) Extract(ctx context.Context, headers map[string]string) context.Context {
-    ctx = trace.ContextWithSpanContext(ctx, trace.SpanContext{})
-    return propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier(headers))
-}
-```
+`oteladapter.NewPropagator()` carries the W3C trace context (`traceparent`, `tracestate`), so the job's attempt span joins the trace of the request that enqueued it ([Observability](Observability.md#tracing)).

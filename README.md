@@ -13,7 +13,7 @@ Durable PostgreSQL work queue for govengers services. Module `github.com/govenge
 - **Many replicas, one table.** Workers claim with `FOR UPDATE SKIP LOCKED` under a lease, extend it with a heartbeat, and fence every write with the lease token, so a worker that lost its lease cannot overwrite a newer attempt.
 - **Failures are handled.** Retries back off exponentially, `jobs.Permanent` ends a job at once, `jobs.Snooze` waits without spending an attempt, a crashed worker's jobs come back through the rescuer, SIGTERM drains and hands unfinished jobs to another replica.
 - **Recurring jobs once per period,** across every replica, without a leader or a cron library.
-- **Plugs into the govengers stack:** wide events (wide-event-logger), the acting identity (auth), Prometheus metrics, livewire's transaction.
+- **Plugs into the govengers stack:** wide events (wide-event-logger), the acting identity (auth), Prometheus metrics, OpenTelemetry traces, livewire's transaction.
 
 Delivery is at least once: handlers must be idempotent.
 
@@ -69,6 +69,7 @@ The tables come from `postgresadapter.MigrationV1`, which you run from one of yo
 | `wideeventadapter` | one wide event per attempt (LOG-001) | wide-event-logger |
 | `authadapter` | carries the `auth.Identity` from the enqueuing request to the handler | govengers/auth |
 | `prometheusadapter` | attempt and store metrics, scrape-time queue depth | client_golang |
+| `oteladapter` | W3C trace context from the enqueuing request into the job, one span per attempt, `trace.id` on the attempt's wide event | OpenTelemetry API |
 | `jobstest` | `Drain`: run every due job synchronously in a test | |
 
 ## A complete service
