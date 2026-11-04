@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	wideevent "github.com/govengers/wide-event-logger"
@@ -21,12 +22,16 @@ import (
 // span, that ends with the stored result; the attempt's wide event carries its IDs.
 func TestTheAttemptSpanContinuesTheEnqueuingTrace(t *testing.T) {
 	tests := map[string]struct {
-		finish     func(context.Context, *jobs.Finish) (jobs.Status, error)
-		wantResult jobs.Result
-		wantStatus codes.Code
+		finish         func(context.Context, *jobs.Finish) (jobs.Status, error)
+		wantResult     jobs.Result
+		wantStatus     codes.Code
+		wantWriteError bool
 	}{
 		"stored": {wantResult: jobs.ResultCompleted, wantStatus: codes.Unset},
 		"fenced": {finish: func(context.Context, *jobs.Finish) (jobs.Status, error) { return "", nil }, wantResult: jobs.ResultFenced, wantStatus: codes.Error},
+		"write failed": {finish: func(context.Context, *jobs.Finish) (jobs.Status, error) {
+			return "", errors.New("connection reset by peer")
+		}, wantResult: jobs.ResultFinishFailed, wantStatus: codes.Error, wantWriteError: true},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -56,7 +61,7 @@ func TestTheAttemptSpanContinuesTheEnqueuingTrace(t *testing.T) {
 			request.End()
 
 			_, err = worker.RunDue(t.Context())
-			require.NoError(t, err)
+			require.Equal(t, test.wantWriteError, err != nil, "RunDue returns a failed write: %v", err)
 
 			spans := recorder.Ended()
 			require.Len(t, spans, 2)
@@ -72,6 +77,7 @@ func TestTheAttemptSpanContinuesTheEnqueuingTrace(t *testing.T) {
 				}
 			}
 			require.Equal(t, string(test.wantResult), result)
+			require.Equal(t, test.wantWriteError, len(attempt.Events()) == 1, "the write error is recorded on the span")
 			emitted := events.emitted()
 			require.Len(t, emitted, 1)
 			require.Equal(t, attempt.SpanContext().TraceID().String(), emitted[0][oteladapter.KeyTraceID])
