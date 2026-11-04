@@ -1,6 +1,6 @@
 # Observability
 
-The library never logs (LIB-003). Three adapters connect it to the govengers stack.
+The library never logs (LIB-003). Four adapters connect it to the govengers stack.
 
 ## Wide events
 
@@ -44,6 +44,22 @@ sum by (queue) (rate(billing_jobs_attempts_total{result="dead"}[15m])) > 0  # jo
 ```
 
 A failed depth query skips the gauges and counts `depth_errors_total`; the rest of the scrape still works.
+
+## Tracing
+
+```go
+jobSpans, err := oteladapter.NewMiddleware(&oteladapter.Options{TracerProvider: provider.TracerProvider()}) // govengers/telemetry/tracing
+store, err := postgresadapter.New(&postgresadapter.Options{..., Propagators: []jobs.Propagator{oteladapter.NewPropagator()}})
+worker, err := jobs.NewWorker(&jobs.WorkerOptions{
+    ...,
+    Middleware:  []jobs.Middleware{jobEvents, jobSpans}, // the wide event first, the span inside it
+    Propagators: []jobs.Propagator{oteladapter.NewPropagator()},
+})
+```
+
+The propagator writes `traceparent` and `tracestate` into the job's headers at enqueue and restores them before the handler runs; a job enqueued outside a trace starts its own. The middleware opens one span per attempt named `job.<queue>`, kind consumer, with `messaging.system` (`govengers_jobs`), `messaging.operation.type` (`process`), `messaging.destination.name` (the queue), `messaging.message.id` (the job ID), `job.kind`, `job.attempt` and `job.maximum_attempts`. A failure records the error and sets the status to error, with `job.permanent`; a snooze sets `job.snoozed` and is no error. In a worker the span ends when the outcome is stored, with `job.result`; an outcome that was not stored (`fenced`, `finish_failed`, `lease_lost`) is an error.
+
+It writes `trace.id` and `trace.span_id` onto the attempt's wide event, the same fields `telemetry/tracing.RecordTraceID` writes on a request's event, so put it after `wideeventadapter`. The package depends on the OpenTelemetry API only; a service that does not import it does not need OpenTelemetry (`go mod why -m go.opentelemetry.io/otel` says so).
 
 ## Identity
 
