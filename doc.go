@@ -8,5 +8,7 @@
 // itself: the Store interface is implemented by the postgresadapter package, which also
 // enqueues jobs and exports the DDL. The design is in docs/design.md.
 //
-// The package never logs and never starts goroutines outside Worker.Run.
+// A handler reports progress with ReportProgress and leaves a result with SetResult.
+//
+// The package never logs and never starts goroutines outside Worker.Run and Worker.RunDue.
 package jobs

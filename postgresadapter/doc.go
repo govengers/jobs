@@ -3,6 +3,7 @@
 // write after the claim with the lease token, and offers the admin operations Get, List,
 // Cancel and Retry.
 //
-// Nothing runs DDL at startup. MigrationV1 holds the tables and indexes for the
-// application's own goose migrations.
+// Nothing runs DDL at startup. MigrationV1 and MigrationV2 hold the tables and indexes for
+// the application's own goose migrations, LivewireTriggerSQL the trigger of a livewire
+// application. View is the stable view of a job for user interfaces.
 package postgresadapter

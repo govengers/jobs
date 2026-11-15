@@ -13,6 +13,7 @@ Durable PostgreSQL work queue for govengers services. Module `github.com/govenge
 - **Many replicas, one table.** Workers claim with `FOR UPDATE SKIP LOCKED` under a lease, extend it with a heartbeat, and fence every write with the lease token, so a worker that lost its lease cannot overwrite a newer attempt.
 - **Failures are handled.** Retries back off exponentially, `jobs.Permanent` ends a job at once, `jobs.Snooze` waits without spending an attempt, a crashed worker's jobs come back through the rescuer, SIGTERM drains and hands unfinished jobs to another replica.
 - **Recurring jobs once per period,** across every replica, without a leader or a cron library.
+- **Progress and results for people.** A handler reports progress (throttled, fenced by the lease) and leaves a small JSON result; a stable job view, live in a govengers/livewire application with cancel and retry.
 - **Plugs into the govengers stack:** wide events (wide-event-logger), the acting identity (auth), Prometheus metrics, OpenTelemetry traces, livewire's transaction.
 
 Delivery is at least once: handlers must be idempotent.
@@ -58,14 +59,22 @@ A handler returns:
 | `jobs.Snooze(delay)` | pending again after `delay`, the attempt does not count |
 | any other error, a panic | retried after the kind's backoff, dead after `MaximumAttempts` |
 
-The tables come from `postgresadapter.MigrationV1`, which you run from one of your goose migrations. Nothing runs DDL at startup.
+A long job reports how far it got and what it produced:
+
+```go
+_ = jobs.ReportProgress(ctx, jobs.Progress{Fraction: 0.4, Message: "page 4 of 10"}) // never blocks
+return jobs.SetResult(ctx, RenderResult{FileID: file.ID})                          // kept once completed
+```
+
+The tables come from `postgresadapter.MigrationV1` and `MigrationV2`, which you run from your goose migrations. Nothing runs DDL at startup.
 
 ## Packages
 
 | Import `github.com/govengers/jobs/...` | Holds | Depends on |
 |---|---|---|
 | (root) `jobs` | `Kind`, `Worker`, `Handle`, outcomes, `Schedule`, `Store`, `Observer`, `Propagator` | uuid, x/sync |
-| `postgresadapter` | the `Store`: `Enqueue`, admin `Get`/`List`/`Cancel`/`Retry`, `QueueDepths`, `MigrationV1` | pgx/v5 |
+| `postgresadapter` | the `Store`: `Enqueue`, admin `Get`/`List`/`Cancel`/`Retry`, the job `View`, `QueueDepths`, `MigrationV1`, `MigrationV2`, `LivewireTriggerSQL` | pgx/v5 |
+| `livewireadapter` | the live, read-only `jobs` resource and the `cancelJob`/`retryJob` mutations for a livewire registry, authorization from the application | govengers/livewire |
 | `wideeventadapter` | one wide event per attempt (LOG-001) | wide-event-logger |
 | `authadapter` | carries the `auth.Identity` from the enqueuing request to the handler | govengers/auth |
 | `prometheusadapter` | attempt and store metrics, scrape-time queue depth | client_golang |
@@ -85,7 +94,7 @@ The tables come from `postgresadapter.MigrationV1`, which you run from one of yo
 
 ## Documentation
 
-- [docs/wiki](docs/wiki/Home.md): kinds and enqueue, the worker, schedules, the store, observability, testing, migration from a hand-rolled queue, gotchas.
+- [docs/wiki](docs/wiki/Home.md): kinds and enqueue, the worker, schedules, the store, progress and results, observability, testing, migration from a hand-rolled queue, gotchas.
 - [docs/design.md](docs/design.md): the binding design with every decision (J1 onwards).
 - [pkg.go.dev](https://pkg.go.dev/github.com/govengers/jobs): the API.
 

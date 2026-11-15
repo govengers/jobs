@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/govengers/jobs"
+	"github.com/govengers/jobs/authadapter"
 	"github.com/govengers/jobs/internal/postgrestest"
 	"github.com/govengers/jobs/livewireadapter"
 	"github.com/govengers/jobs/postgresadapter"
@@ -53,7 +54,7 @@ type fixture struct {
 func newFixture(t *testing.T, options *livewireadapter.Options) *fixture {
 	t.Helper()
 	pool := postgrestest.New(t)
-	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool, Propagators: []jobs.Propagator{authadapter.Identity()}})
 	require.NoError(t, err)
 	options.Store, options.Pool = store, pool
 	declarations, err := livewireadapter.Declarations(options)
@@ -81,7 +82,12 @@ func as(identity *auth.Identity) context.Context {
 
 func (f *fixture) enqueue(job *jobs.PreparedJob) uuid.UUID {
 	f.t.Helper()
-	ids, err := f.store.Enqueue(context.Background(), f.pool, job)
+	return f.enqueueAs(context.Background(), job)
+}
+
+func (f *fixture) enqueueAs(ctx context.Context, job *jobs.PreparedJob) uuid.UUID {
+	f.t.Helper()
+	ids, err := f.store.Enqueue(ctx, f.pool, job)
 	require.NoError(f.t, err)
 	return ids[0]
 }
@@ -252,4 +258,20 @@ func (f *fixture) record(id uuid.UUID) *postgresadapter.Record {
 	record, err := f.store.Get(context.Background(), id)
 	require.NoError(f.t, err)
 	return record
+}
+
+// The scope of the example reaches the jobs an identity enqueued, through authadapter's
+// identity snapshot.
+func TestTheExampleScopeShowsTheJobsAnIdentityStarted(t *testing.T) {
+	fixture := newFixture(t, &livewireadapter.Options{Read: authorization.IsUser(), Write: authorization.IsUser(), Scope: ownJobs})
+	own := fixture.enqueueAs(as(viewer), mailKind.New(mailPayload{}, nil))
+	other := fixture.enqueueAs(as(operator), mailKind.New(mailPayload{}, nil))
+	fixture.enqueue(mailKind.New(mailPayload{}, nil)) // a job without an identity, such as a schedule's
+
+	page, err := fixture.list(as(viewer), livewire.MapSource{})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, own, page.Items[0].ID)
+	_, err = fixture.call(as(viewer), livewireadapter.CancelName, other)
+	requireStatus(t, err, http.StatusNotFound)
 }
