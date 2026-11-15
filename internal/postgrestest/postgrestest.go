@@ -65,8 +65,9 @@ func Main(m *testing.M) {
 }
 
 // New returns a pool on a fresh schema of the test PostgreSQL with postgresadapter.MigrationV1
-// applied; the pool is closed and the schema dropped when the test ends. The pool's connection
-// string, pool.Config().ConnString(), reaches the same schema, for processes the test starts.
+// and MigrationV2 applied; the pool is closed and the schema dropped when the test ends. The
+// pool's connection string, pool.Config().ConnString(), reaches the same schema, for processes
+// the test starts.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	instance.once.Do(instance.start)
@@ -89,8 +90,10 @@ func New(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		dropSchema(t, schema)
 	})
-	if _, err := pool.Exec(ctx, postgresadapter.MigrationV1); err != nil {
-		t.Fatalf("apply MigrationV1: %v", err)
+	for _, migration := range []string{postgresadapter.MigrationV1, postgresadapter.MigrationV2} {
+		if _, err := pool.Exec(ctx, migration); err != nil {
+			t.Fatalf("apply the migrations: %v", err)
+		}
 	}
 	return pool
 }

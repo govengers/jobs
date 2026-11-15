@@ -18,6 +18,9 @@ type Store interface {
 	// a pending result of a job whose cancellation was requested is stored as cancelled. An
 	// empty status means the lease was no longer held and nothing was written.
 	Finish(ctx context.Context, finish *Finish) (Status, error)
+	// WriteProgress stores progress on the job of lease if the lease is still held, and reports
+	// whether it did (J54).
+	WriteProgress(ctx context.Context, lease Lease, progress Progress) (bool, error)
 	// Rescue returns up to limit running jobs whose lease expired to pending, or to dead when
 	// their attempts are used up; the lost attempt counts. It returns how many it moved.
 	Rescue(ctx context.Context, limit int) (int, error)

@@ -26,6 +26,7 @@ const (
 	DefaultRescueInterval   = 30 * time.Second
 	DefaultSweepInterval    = time.Hour
 	DefaultScheduleInterval = 10 * time.Second
+	DefaultProgressInterval = time.Second
 	DefaultRetainCompleted  = 7 * 24 * time.Hour
 	DefaultRetainDead       = 30 * 24 * time.Hour
 )
@@ -81,6 +82,9 @@ type QueueOptions struct {
 	// takes. (A Lease is the claim itself: a job ID and a token.)
 	LeaseDuration time.Duration
 	PollInterval  time.Duration // how long an idle queue waits before it looks for jobs again
+	// ProgressInterval is the shortest time between two progress writes of one attempt; reports
+	// in between are coalesced into the latest (ReportProgress).
+	ProgressInterval time.Duration
 }
 
 // Worker claims jobs of its queues, runs their handlers and writes the outcome, and keeps the

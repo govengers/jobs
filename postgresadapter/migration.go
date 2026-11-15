@@ -52,3 +52,64 @@ CREATE TABLE govengers_job_schedules (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 `
+
+// MigrationV2 adds what an attempt reports besides its outcome (J53): the progress of the
+// running attempt, the result of a completed job, the class of the last error and when the
+// last attempt started. Run it in a goose migration after MigrationV1, before the replicas run
+// this version of the module: it only adds nullable columns and NOT VALID checks, so it takes
+// a short ACCESS EXCLUSIVE lock and rewrites nothing, and the replicas of the previous version
+// keep working on the new schema (they never read or write the new columns).
+const MigrationV2 = `
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+ALTER TABLE govengers_jobs
+    ADD COLUMN progress double precision,
+    ADD COLUMN progress_message text,
+    ADD COLUMN result jsonb,
+    ADD COLUMN error_class text,
+    ADD COLUMN started_at timestamptz;
+
+-- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress
+    CHECK (progress >= 0 AND progress <= 1) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress_message
+    CHECK (char_length(progress_message) <= 200) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_result
+    CHECK (pg_column_size(result) <= 262144) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
+    CHECK (error_class IN ('transient', 'permanent', 'lease_expired')) NOT VALID;
+`
+
+// LivewireTriggerSQL makes govengers_jobs notify a govengers/livewire engine of the changes a
+// user interface shows, so a live subscription of a resource that lists the table re-runs
+// (J56). Use it instead of livewire's TriggerSQL("govengers_jobs"), after livewire's
+// TriggerFunctionSQL, in a goose migration after MigrationV2. An insert, a delete and a
+// TRUNCATE always notify; an update notifies only when a column of View changed, so a lease
+// extension of the heartbeat, which runs every lease/3 for every running job, notifies nothing.
+// Every claim, finish and progress write still notifies: on a busy queue the subscriptions of
+// the table re-run often (livewire coalesces them per subscription).
+const LivewireTriggerSQL = `
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+CREATE OR REPLACE TRIGGER livewire_notify AFTER INSERT OR DELETE ON govengers_jobs
+    FOR EACH ROW EXECUTE FUNCTION livewire_notify();
+CREATE OR REPLACE TRIGGER livewire_notify_update AFTER UPDATE ON govengers_jobs
+    FOR EACH ROW WHEN (
+        OLD.status IS DISTINCT FROM NEW.status
+        OR OLD.attempt IS DISTINCT FROM NEW.attempt
+        OR OLD.run_at IS DISTINCT FROM NEW.run_at
+        OR OLD.cancel_requested IS DISTINCT FROM NEW.cancel_requested
+        OR OLD.last_error IS DISTINCT FROM NEW.last_error
+        OR OLD.error_class IS DISTINCT FROM NEW.error_class
+        OR OLD.progress IS DISTINCT FROM NEW.progress
+        OR OLD.progress_message IS DISTINCT FROM NEW.progress_message
+        OR OLD.result IS DISTINCT FROM NEW.result
+        OR OLD.started_at IS DISTINCT FROM NEW.started_at
+        OR OLD.finished_at IS DISTINCT FROM NEW.finished_at
+    )
+    EXECUTE FUNCTION livewire_notify();
+CREATE OR REPLACE TRIGGER livewire_notify_truncate AFTER TRUNCATE ON govengers_jobs
+    FOR EACH STATEMENT EXECUTE FUNCTION livewire_notify();
+`

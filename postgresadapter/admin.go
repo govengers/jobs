@@ -42,10 +42,16 @@ type Record struct {
 	UniqueKey       string // empty once the job started (J19)
 	Worker          string // the worker holding the lease while running
 	CancelRequested bool
-	LastError       string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	FinishedAt      *time.Time // nil until completed, dead or cancelled
+	LastError       string          // the error of the last failed attempt; a later success keeps it
+	ErrorClass      jobs.ErrorClass // the class of LastError; empty without one (J55)
+	// Progress is the last progress report of the running attempt, or of the last attempt once
+	// it ended; nil while none was reported. A claim clears it (J54).
+	Progress   *jobs.Progress
+	Result     json.RawMessage // what the handler set with jobs.SetResult; nil unless completed with a result
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	StartedAt  *time.Time // when the last attempt was claimed; nil before the first claim
+	FinishedAt *time.Time // nil until completed, dead or cancelled
 }
 
 // ListFilter selects the jobs of List, newest first.
@@ -58,7 +64,8 @@ type ListFilter struct {
 
 const recordColumns = `id, queue, kind, payload, headers, status, run_at, attempt, maximum_attempts,
     COALESCE(unique_key, ''), COALESCE(worker, ''), cancel_requested, COALESCE(last_error, ''),
-    created_at, updated_at, finished_at`
+    COALESCE(error_class, ''), progress, COALESCE(progress_message, ''), result,
+    created_at, updated_at, started_at, finished_at`
 
 // Get returns the job with id, or ErrNotFound.
 func (s *Store) Get(ctx context.Context, id uuid.UUID) (*Record, error) {
@@ -102,10 +109,41 @@ func (s *Store) List(ctx context.Context, filter *ListFilter) ([]*Record, error)
 
 func scanRecord(row pgx.CollectableRow) (*Record, error) {
 	record := &Record{}
+	var fraction *float64
+	var message string
 	err := row.Scan(&record.ID, &record.Queue, &record.Kind, &record.Payload, &record.Headers, &record.Status,
 		&record.RunAt, &record.Attempt, &record.MaximumAttempts, &record.UniqueKey, &record.Worker, &record.CancelRequested,
-		&record.LastError, &record.CreatedAt, &record.UpdatedAt, &record.FinishedAt)
+		&record.LastError, &record.ErrorClass, &fraction, &message, &record.Result,
+		&record.CreatedAt, &record.UpdatedAt, &record.StartedAt, &record.FinishedAt)
+	if fraction != nil {
+		record.Progress = &jobs.Progress{Fraction: *fraction, Message: message}
+	}
 	return record, err
+}
+
+// Querier runs the read of ViewsOn: a pgx.Tx, a *pgxpool.Pool, a *pgx.Conn, or the handle of a
+// govengers/livewire unit of work (its postgresadapter.DBTX).
+type Querier interface {
+	Query(ctx context.Context, statement string, arguments ...any) (pgx.Rows, error)
+}
+
+// ViewsOn reads the views of the jobs with ids on querier, usually the caller's transaction,
+// so the read sees the caller's snapshot; ids without a job are absent from the map. It is the
+// hydration of a list the caller pages itself (livewireadapter does).
+func (s *Store) ViewsOn(ctx context.Context, querier Querier, ids []uuid.UUID) (map[uuid.UUID]View, error) {
+	rows, err := querier.Query(ctx, "SELECT "+recordColumns+" FROM govengers_jobs WHERE id = ANY($1)", ids)
+	if err != nil {
+		return nil, wrapDriverError(err, "read %d job views", len(ids))
+	}
+	records, err := pgx.CollectRows(rows, scanRecord)
+	if err != nil {
+		return nil, wrapDriverError(err, "read %d job views", len(ids))
+	}
+	views := make(map[uuid.UUID]View, len(records))
+	for _, record := range records {
+		views[record.ID] = record.View()
+	}
+	return views, nil
 }
 
 // cancelJob cancels a pending job at once and asks the worker of a running job to cancel it.
@@ -121,46 +159,58 @@ WHERE id = $1 AND status IN ('pending', 'running')`
 // heartbeat reads the request, which cancels the handler's context with cause jobs.ErrCancelled.
 // It returns ErrNotFound or ErrFinished.
 func (s *Store) Cancel(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, cancelJob, id)
-	if err != nil {
-		return wrapDriverError(err, "cancel job %s", id)
-	}
-	if tag.RowsAffected() == 1 {
-		return nil
-	}
-	return s.explainMiss(ctx, id, ErrFinished, "cancel")
+	return s.CancelOn(ctx, s.pool, id)
 }
 
-// retryJob starts a dead job over: its attempts, its last error and a cancellation requested
-// before it died are reset, so the first heartbeat of the new run does not cancel it.
+// CancelOn is Cancel on executor, usually the caller's transaction, so the cancellation commits
+// or rolls back with the caller's change.
+func (s *Store) CancelOn(ctx context.Context, executor Executor, id uuid.UUID) error {
+	return updateOne(ctx, executor, cancelJob, id, ErrFinished, "cancel")
+}
+
+// retryJob starts a dead job over: its attempts, its last error with its class, its progress,
+// its start and a cancellation requested before it died are reset, so the first heartbeat of
+// the new run does not cancel it.
 const retryJob = `
 UPDATE govengers_jobs SET
     status = 'pending',
     attempt = 0,
     run_at = now(),
+    started_at = NULL,
     finished_at = NULL,
     cancel_requested = false,
     last_error = NULL,
+    error_class = NULL,
+    progress = NULL,
+    progress_message = NULL,
     updated_at = now()
 WHERE id = $1 AND status = 'dead'`
 
-// Retry returns the dead job with id to pending with its attempts, its last error and any
-// earlier cancellation request reset. It returns ErrNotFound or ErrNotDead.
+// Retry returns the dead job with id to pending with its attempts, its last error, its
+// progress and any earlier cancellation request reset. It returns ErrNotFound or ErrNotDead.
 func (s *Store) Retry(ctx context.Context, id uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, retryJob, id)
-	if err != nil {
-		return wrapDriverError(err, "retry job %s", id)
-	}
-	if tag.RowsAffected() == 1 {
-		return nil
-	}
-	return s.explainMiss(ctx, id, ErrNotDead, "retry")
+	return s.RetryOn(ctx, s.pool, id)
 }
 
-// explainMiss tells a missing job from one in the wrong status after an update matched no row.
-func (s *Store) explainMiss(ctx context.Context, id uuid.UUID, wrongStatus error, operation string) error {
-	if _, err := s.Get(ctx, id); err != nil {
-		return fmt.Errorf("%s job: %w", operation, err)
+// RetryOn is Retry on executor, usually the caller's transaction.
+func (s *Store) RetryOn(ctx context.Context, executor Executor, id uuid.UUID) error {
+	return updateOne(ctx, executor, retryJob, id, ErrNotDead, "retry")
+}
+
+// updateOne runs an admin update of the job with id and tells a missing job (ErrNotFound) from
+// one in the wrong status when it matched no row.
+func updateOne(ctx context.Context, executor Executor, statement string, id uuid.UUID, wrongStatus error, operation string) error {
+	var updated uuid.UUID
+	err := executor.QueryRow(ctx, statement+" RETURNING id", id).Scan(&updated)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return wrapDriverError(err, "%s job %s", operation, id)
+	}
+	var exists bool
+	if err := executor.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM govengers_jobs WHERE id = $1)", id).Scan(&exists); err != nil {
+		return wrapDriverError(err, "%s job %s", operation, id)
+	}
+	if !exists {
+		return fmt.Errorf("%s job %s: %w", operation, id, ErrNotFound)
 	}
 	return fmt.Errorf("%s job %s: %w", operation, id, wrongStatus)
 }
