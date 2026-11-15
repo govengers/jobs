@@ -152,6 +152,26 @@ func TestViewsOnReadsTheGivenJobs(t *testing.T) {
 	require.Equal(t, 3, views[second].MaximumAttempts)
 }
 
+// J57: ListViewsOn is ViewsOn without the result.
+func TestListViewsOnLeavesTheResultOut(t *testing.T) {
+	store, pool := newStore(t)
+	ctx := context.Background()
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+	_, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusCompleted, Result: json.RawMessage(`{"pages": 12}`)})
+	require.NoError(t, err)
+
+	full, err := store.ViewsOn(ctx, pool, []uuid.UUID{id})
+	require.NoError(t, err)
+	listed, err := store.ListViewsOn(ctx, pool, []uuid.UUID{id})
+	require.NoError(t, err)
+
+	require.JSONEq(t, `{"pages": 12}`, string(full[id].Result))
+	expected := full[id]
+	expected.Result = nil
+	require.Equal(t, expected, listed[id])
+}
+
 func TestStateOfMapsEveryStatus(t *testing.T) {
 	for status, state := range map[jobs.Status]postgresadapter.State{
 		jobs.StatusPending: postgresadapter.StateQueued, jobs.StatusRunning: postgresadapter.StateRunning,
@@ -208,6 +228,7 @@ func TestMigrationV2ChecksTheNewColumns(t *testing.T) {
 		"UPDATE govengers_jobs SET progress = 'NaN' WHERE id = $1",
 		"UPDATE govengers_jobs SET error_class = 'unknown' WHERE id = $1",
 		"UPDATE govengers_jobs SET progress_message = repeat('x', 201) WHERE id = $1",
+		"UPDATE govengers_jobs SET result = to_jsonb(array_fill(0, ARRAY[50000])) WHERE id = $1", // 600 KB of jsonb
 	} {
 		_, err := pool.Exec(ctx, statement, id)
 		require.Error(t, err, statement)

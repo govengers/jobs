@@ -170,6 +170,29 @@ func TestTheResourceListsAndReadsJobViews(t *testing.T) {
 	requireStatus(t, err, http.StatusNotFound)
 }
 
+// A list item leaves the result out, the item read carries it; a job without an error has a
+// null error class, the value the errorClass filter matches with isNull.
+func TestListItemsLeaveTheResultToTheItemRead(t *testing.T) {
+	fixture := newOperatorFixture(t)
+	id := fixture.enqueue(reportKind.New(mailPayload{}, nil))
+	claims, err := fixture.store.Claim(context.Background(), &jobs.ClaimRequest{Queue: "reports", Limit: 1, LeaseDuration: time.Minute, Worker: "test"})
+	require.NoError(t, err)
+	_, err = fixture.store.Finish(context.Background(), &jobs.Finish{Lease: claims[0].Lease, Status: jobs.StatusCompleted, Result: json.RawMessage(`{"pages": 12}`)})
+	require.NoError(t, err)
+
+	payload, err := fixture.engine.Read(as(viewer), livewire.ReadRequest{Target: livewireadapter.ResourceName, Source: livewire.MapSource{}})
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"result":null`)
+	require.Contains(t, string(payload), `"errorClass":null`)
+	withoutError, err := fixture.list(as(viewer), livewire.MapSource{"filter": `{"where": {"field": "errorClass", "op": "isNull", "value": true}}`})
+	require.NoError(t, err)
+	require.Len(t, withoutError.Items, 1)
+
+	view, err := fixture.item(as(viewer), id)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"pages": 12}`, string(view.Result))
+}
+
 func TestTheReadCheckIsTheApplications(t *testing.T) {
 	fixture := newFixture(t, &livewireadapter.Options{Read: authorization.HasRole("operator")})
 
@@ -261,7 +284,7 @@ func (f *fixture) record(id uuid.UUID) *postgresadapter.Record {
 }
 
 // The scope of the example reaches the jobs an identity enqueued, through authadapter's
-// identity snapshot.
+// identity snapshot, and every job for an operator.
 func TestTheExampleScopeShowsTheJobsAnIdentityStarted(t *testing.T) {
 	fixture := newFixture(t, &livewireadapter.Options{Read: authorization.IsUser(), Write: authorization.IsUser(), Scope: ownJobs})
 	own := fixture.enqueueAs(as(viewer), mailKind.New(mailPayload{}, nil))
@@ -274,4 +297,10 @@ func TestTheExampleScopeShowsTheJobsAnIdentityStarted(t *testing.T) {
 	require.Equal(t, own, page.Items[0].ID)
 	_, err = fixture.call(as(viewer), livewireadapter.CancelName, other)
 	requireStatus(t, err, http.StatusNotFound)
+
+	page, err = fixture.list(as(operator), livewire.MapSource{})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 3, "an operator sees every job")
+	_, err = fixture.call(as(operator), livewireadapter.CancelName, own)
+	require.NoError(t, err, "and cancels the jobs of others")
 }

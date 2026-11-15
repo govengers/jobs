@@ -1,5 +1,6 @@
 // Package livewireadapter declares the jobs of a postgresadapter.Store for a govengers/livewire
-// registry (J57): the read-only resource "jobs" of postgresadapter.View, live once the
+// registry (J57): the read-only resource "jobs" of postgresadapter.View (list items without
+// the result, the item read with it), live once the
 // migrations ran postgresadapter.LivewireTriggerSQL, and the mutations "cancelJob" and
 // "retryJob". The application decides who may read and who may write; the declarations bring
 // no authorization of their own.
@@ -45,7 +46,8 @@ type Options struct {
 	// livewire Check; narrow the rows with Scope.
 	Read authorization.Check
 	// Write decides who may cancel and retry jobs. Nil declares no mutation: the jobs are read
-	// only.
+	// only. Write implies reading the job changed: a mutation answers the job's View, whether
+	// or not Read passes; Scope narrows the mutations like the reads.
 	Write authorization.Check
 	// Scope narrows the jobs an identity reads and may cancel or retry, as a predicate over
 	// govengers_jobs (a queue, a kind, a header); a job outside it is not found. Nil, or a nil
@@ -85,6 +87,8 @@ const stateSQL = `CASE govengers_jobs.status WHEN 'pending' THEN 'queued' WHEN '
     WHEN 'completed' THEN 'succeeded' WHEN 'dead' THEN 'failed' ELSE 'cancelled' END`
 
 // fields are the filterable and sortable fields of the resource, by the JSON names of View.
+// updatedAt is not one: the heartbeat moves it without a notification, so a live list sorted
+// or filtered by it would not follow.
 func fields() query.Fields {
 	return query.Fields{
 		{Name: "id", Type: query.TypeUUID, SQL: Table + ".id", Filter: true, Sort: true},
@@ -102,7 +106,6 @@ func fields() query.Fields {
 		{Name: "runAt", Type: query.TypeTime, SQL: Table + ".run_at", Filter: true, Sort: true},
 		{Name: "startedAt", Type: query.TypeTime, SQL: Table + ".started_at", Nullable: true, Filter: true, Sort: true},
 		{Name: "finishedAt", Type: query.TypeTime, SQL: Table + ".finished_at", Nullable: true, Filter: true, Sort: true},
-		{Name: "updatedAt", Type: query.TypeTime, SQL: Table + ".updated_at", Filter: true, Sort: true},
 	}
 }
 
@@ -119,12 +122,19 @@ func (a *adapter) resource() *livewire.Resource {
 	})
 }
 
+// list answers the views without their results; the item read carries the result.
 func (a *adapter) list(ctx context.Context, listQuery *query.ListQuery) (*livewire.Page[postgresadapter.View], error) {
-	return livewirepostgres.ListPage(ctx, a.options.Pool, jobsSQL, listQuery, a.hydrate)
+	return livewirepostgres.ListPage(ctx, a.options.Pool, jobsSQL, listQuery,
+		func(ctx context.Context, database livewirepostgres.DBTX, rows []livewirepostgres.PageRow) (map[uuid.UUID]postgresadapter.View, error) {
+			return a.options.Store.ListViewsOn(ctx, database, livewirepostgres.PageIDs(rows))
+		})
 }
 
 func (a *adapter) get(ctx context.Context, listQuery *query.ListQuery) (*postgresadapter.View, error) {
-	page, err := a.list(ctx, listQuery)
+	page, err := livewirepostgres.ListPage(ctx, a.options.Pool, jobsSQL, listQuery,
+		func(ctx context.Context, database livewirepostgres.DBTX, rows []livewirepostgres.PageRow) (map[uuid.UUID]postgresadapter.View, error) {
+			return a.options.Store.ViewsOn(ctx, database, livewirepostgres.PageIDs(rows))
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -132,10 +142,6 @@ func (a *adapter) get(ctx context.Context, listQuery *query.ListQuery) (*postgre
 		return nil, livewire.NotFound()
 	}
 	return &page.Items[0], nil
-}
-
-func (a *adapter) hydrate(ctx context.Context, database livewirepostgres.DBTX, rows []livewirepostgres.PageRow) (map[uuid.UUID]postgresadapter.View, error) {
-	return a.options.Store.ViewsOn(ctx, database, livewirepostgres.PageIDs(rows))
 }
 
 // jobParameters names the job of a mutation.

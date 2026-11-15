@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,7 +132,20 @@ type Querier interface {
 // so the read sees the caller's snapshot; ids without a job are absent from the map. It is the
 // hydration of a list the caller pages itself (livewireadapter does).
 func (s *Store) ViewsOn(ctx context.Context, querier Querier, ids []uuid.UUID) (map[uuid.UUID]View, error) {
-	rows, err := querier.Query(ctx, "SELECT "+recordColumns+" FROM govengers_jobs WHERE id = ANY($1)", ids)
+	return viewsOn(ctx, querier, recordColumns, ids)
+}
+
+// ListViewsOn is ViewsOn without View.Result, for the items of a list: a page of jobs does not
+// read and send a result of up to jobs.MaximumResultBytes per job each time it re-runs.
+func (s *Store) ListViewsOn(ctx context.Context, querier Querier, ids []uuid.UUID) (map[uuid.UUID]View, error) {
+	return viewsOn(ctx, querier, listColumns, ids)
+}
+
+// listColumns are recordColumns without the result.
+var listColumns = strings.Replace(recordColumns, " result,", " NULL::jsonb,", 1)
+
+func viewsOn(ctx context.Context, querier Querier, columns string, ids []uuid.UUID) (map[uuid.UUID]View, error) {
+	rows, err := querier.Query(ctx, "SELECT "+columns+" FROM govengers_jobs WHERE id = ANY($1)", ids)
 	if err != nil {
 		return nil, wrapDriverError(err, "read %d job views", len(ids))
 	}

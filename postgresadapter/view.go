@@ -50,17 +50,21 @@ type View struct {
 	MaximumAttempts int       `json:"maximumAttempts"`
 	// Progress is in percent, 0 to 100: nil while the running or last attempt reported none,
 	// 100 once the job succeeded.
-	Progress        *float64        `json:"progress"`
-	ProgressMessage string          `json:"progressMessage"`
-	Result          json.RawMessage `json:"result"`     // what the handler set with jobs.SetResult; null unless succeeded with one
-	Error           string          `json:"error"`      // the last failed attempt's error; a later success keeps it
-	ErrorClass      jobs.ErrorClass `json:"errorClass"` // empty without an error
-	CancelRequested bool            `json:"cancelRequested"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	RunAt           time.Time       `json:"runAt"`     // when a queued job may run next
-	StartedAt       *time.Time      `json:"startedAt"` // when the last attempt started
-	FinishedAt      *time.Time      `json:"finishedAt"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
+	Progress        *float64 `json:"progress"`
+	ProgressMessage string   `json:"progressMessage"`
+	// Result is what the handler set with jobs.SetResult; null unless succeeded with one. The
+	// list items of livewireadapter's resource leave it out (null): read the item for it.
+	Result          json.RawMessage  `json:"result"`
+	Error           string           `json:"error"`      // the last failed attempt's error; a later success keeps it
+	ErrorClass      *jobs.ErrorClass `json:"errorClass"` // the class of Error; null without an error
+	CancelRequested bool             `json:"cancelRequested"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	RunAt           time.Time        `json:"runAt"`     // when a queued job may run next
+	StartedAt       *time.Time       `json:"startedAt"` // when the last attempt started
+	FinishedAt      *time.Time       `json:"finishedAt"`
+	// UpdatedAt is the last write to the job, the lease extensions of its worker's heartbeat
+	// included. LivewireTriggerSQL does not notify on it, so a live list shows it stale.
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // View returns the record's view.
@@ -68,8 +72,11 @@ func (r *Record) View() View {
 	view := View{
 		ID: r.ID, Queue: r.Queue, Kind: r.Kind, Status: StateOf(r.Status),
 		Attempt: r.Attempt, MaximumAttempts: r.MaximumAttempts,
-		Result: r.Result, Error: r.LastError, ErrorClass: r.ErrorClass, CancelRequested: r.CancelRequested,
+		Result: r.Result, Error: r.LastError, CancelRequested: r.CancelRequested,
 		CreatedAt: r.CreatedAt, RunAt: r.RunAt, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt, UpdatedAt: r.UpdatedAt,
+	}
+	if r.ErrorClass != "" {
+		view.ErrorClass = new(r.ErrorClass)
 	}
 	if r.Progress != nil {
 		view.Progress = new(r.Progress.Fraction * 100)

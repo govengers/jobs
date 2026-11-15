@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/govengers/auth"
 	"github.com/govengers/auth/authorization"
@@ -15,12 +16,16 @@ import (
 	"github.com/govengers/jobs/postgresadapter"
 )
 
-// ownJobs is a Scope: an identity sees and changes the jobs it enqueued, by the identity
-// snapshot authadapter.Identity() writes into the job's headers.
+// ownJobs is a Scope: an operator sees every job, any other identity the jobs it enqueued, by
+// the identity snapshot authadapter.Identity() writes into the job's headers. The scope
+// narrows the mutations too, so an operator reaches every job only because it sees every job.
 func ownJobs(ctx context.Context) (query.Predicate, error) {
 	identity := auth.IdentityFrom(ctx)
 	if identity == nil {
 		return nil, errors.New("jobs read without an identity")
+	}
+	if slices.Contains(identity.Roles, "operator") {
+		return nil, nil //nolint:nilnil // a nil predicate is every job (Options.Scope)
 	}
 	return func(builder *query.Builder) {
 		builder.WriteString("(govengers_jobs.headers->>'auth.identity')::jsonb->>'provider' = ").Argument(identity.Provider)
@@ -28,8 +33,8 @@ func ownJobs(ctx context.Context) (query.Predicate, error) {
 	}, nil
 }
 
-// The jobs of a livewire application: every user reads the jobs it started, operators cancel
-// and retry them. The migrations run livewire's TriggerFunctionSQL, then
+// The jobs of a livewire application: every user reads the jobs it started, operators read,
+// cancel and retry every job. The migrations run livewire's TriggerFunctionSQL, then
 // postgresadapter.LivewireTriggerSQL, so the subscriptions go live.
 func ExampleDeclarations() {
 	var (
