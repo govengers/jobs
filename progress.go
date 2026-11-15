@@ -103,8 +103,10 @@ type attemptOutput struct {
 	pending     *Progress   // the latest report not handed to a write yet
 	scheduled   *time.Timer // the timer of the next background write, nil when none is due
 	lastWritten time.Time
-	writing     sync.WaitGroup // the background write in flight
-	result      json.RawMessage
+	// flushes counts the scheduled timers until their flush returned or they were stopped, so
+	// close can wait until no goroutine of the attempt's reporting runs any more.
+	flushes sync.WaitGroup
+	result  json.RawMessage
 }
 
 func withAttemptOutput(ctx context.Context, write progressWriter, interval time.Duration) (context.Context, *attemptOutput) {
@@ -129,12 +131,14 @@ func (o *attemptOutput) scheduleLocked() {
 		return
 	}
 	delay := max(0, o.interval-time.Since(o.lastWritten))
+	o.flushes.Add(1)
 	o.scheduled = time.AfterFunc(delay, o.flush)
 }
 
 // flush writes the pending report in the timer's goroutine; only one write runs at a time,
 // because the next timer starts when this one ends.
 func (o *attemptOutput) flush() {
+	defer o.flushes.Done()
 	o.mutex.Lock()
 	if o.closed {
 		o.mutex.Unlock()
@@ -142,14 +146,12 @@ func (o *attemptOutput) flush() {
 	}
 	progress := o.pending
 	o.pending = nil
-	o.writing.Add(1)
 	o.mutex.Unlock()
 
 	o.write(*progress)
 
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
-	o.writing.Done()
 	o.lastWritten = time.Now()
 	o.scheduled = nil
 	if !o.closed {
@@ -157,16 +159,18 @@ func (o *attemptOutput) flush() {
 	}
 }
 
-// close ends the attempt's reporting: it stops the next background write, waits for one in
-// flight and returns the report no write took, for the finish write, with the result.
+// close ends the attempt's reporting: it stops the next background write, waits for a write
+// in flight, and returns the report no write took, for the finish write, with the result.
+// Once it returned, no goroutine of the reporting runs.
 func (o *attemptOutput) close() (*Progress, json.RawMessage) {
 	o.mutex.Lock()
 	o.closed = true
 	if o.scheduled != nil && o.scheduled.Stop() {
 		o.scheduled = nil
+		o.flushes.Done() // the stopped timer never runs its flush
 	}
 	o.mutex.Unlock()
-	o.writing.Wait()
+	o.flushes.Wait()
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
 	return o.pending, o.result
