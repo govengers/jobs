@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -165,24 +166,28 @@ func TestTextPostgreSQLRefusesDoesNotFailTheFinishWrite(t *testing.T) {
 	require.Equal(t, "bad name �", record.LastError)
 }
 
-// J55: every result SetResult accepts, the finish write stores, even the shapes jsonb stores
-// at 6 times their JSON size; a result jsonb refuses is refused by SetResult.
+// J60: every result SetResult accepts, the finish write stores byte for byte, also what jsonb
+// refuses: a relayed body with a lone surrogate escape (JavaScript cutting a string inside an
+// emoji), the escape \u0000, a number beyond numeric, and a result exactly at the cap.
 func TestEveryResultSetResultAcceptsIsStored(t *testing.T) {
+	type relayed struct {
+		Status int             `json:"status"`
+		Body   json.RawMessage `json:"body"`
+	}
 	harness := newHarness(t)
 	worker := harness.worker(nil)
-	zeros := make([]int, (jobs.MaximumResultBytes-1)/2) // [0,0,...]: 2 bytes of JSON, 12 of jsonb each
-	nested := make([][1]int, (jobs.MaximumResultBytes-1)/4)
-	results := map[string]any{"zeros": zeros, "nested": nested}
+	results := map[string]any{
+		"surrogate": relayed{Status: 200, Body: json.RawMessage(`{"title":"Launch party \ud83c"}`)},
+		"nul":       map[string]string{"name": "a\x00b"},
+		"number":    json.Number("1e131072"),
+		"cap":       strings.Repeat("x", jobs.MaximumResultBytes-2), // with its quotes exactly the cap
+	}
 	kind := jobs.NewKind[mailPayload]("mail.result_shape", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 1})
 	require.NoError(t, jobs.Handle(worker, kind, func(ctx context.Context, job *jobs.Job[mailPayload]) error {
-		if job.Payload.Recipient == "nul" {
-			require.ErrorIs(t, jobs.SetResult(ctx, map[string]string{"name": "a\x00b"}), jobs.ErrResultNotStorable)
-			return nil
-		}
 		return jobs.SetResult(ctx, results[job.Payload.Recipient])
 	}))
 	ids := map[string]uuid.UUID{}
-	for _, name := range []string{"zeros", "nested", "nul"} {
+	for name := range results {
 		ids[name] = harness.enqueue(context.Background(), kind.New(mailPayload{Recipient: name}, nil))
 	}
 
@@ -190,9 +195,10 @@ func TestEveryResultSetResultAcceptsIsStored(t *testing.T) {
 
 	require.NoError(t, err)
 	for name, id := range ids {
-		require.Equal(t, jobs.StatusCompleted, harness.record(id).Status, name)
+		record := harness.record(id)
+		require.Equal(t, jobs.StatusCompleted, record.Status, name)
+		encoded, err := json.Marshal(results[name])
+		require.NoError(t, err)
+		require.Equal(t, string(encoded), string(record.Result), name)
 	}
-	var stored []int
-	require.NoError(t, json.Unmarshal(harness.record(ids["zeros"]).Result, &stored))
-	require.Len(t, stored, len(zeros))
 }

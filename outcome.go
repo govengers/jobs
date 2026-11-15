@@ -117,7 +117,7 @@ type Finish struct {
 	// the stored progress. Its message is valid UTF-8 without NUL (ReportProgress ensures it).
 	Progress *Progress
 	// Result is stored when Status is completed: the JSON the handler set with SetResult, nil
-	// for none; at most MaximumResultBytes, UTF-8, without the escape \u0000.
+	// for none; at most MaximumResultBytes, UTF-8.
 	Result json.RawMessage
 }
 

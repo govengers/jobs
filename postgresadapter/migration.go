@@ -66,19 +66,19 @@ SET LOCAL statement_timeout = '30s';
 ALTER TABLE govengers_jobs
     ADD COLUMN progress double precision,
     ADD COLUMN progress_message text,
-    ADD COLUMN result jsonb,
+    ADD COLUMN result json,
     ADD COLUMN error_class text,
     ADD COLUMN started_at timestamptz;
 
 -- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked.
--- The result bound is 8 times jobs.MaximumResultBytes: jsonb stores a one-digit number in 12
--- bytes, 6 times its 2 bytes of JSON text, so every result SetResult accepts fits.
+-- result is json, not jsonb: it keeps the text SetResult accepted byte for byte and checks only
+-- its syntax, so every accepted result fits, and the bound is jobs.MaximumResultBytes exactly.
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress
     CHECK (progress >= 0 AND progress <= 1) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress_message
     CHECK (char_length(progress_message) <= 200) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_result
-    CHECK (pg_column_size(result) <= 524288) NOT VALID;
+    CHECK (octet_length(result::text) <= 65536) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
     CHECK (error_class IN ('transient', 'permanent', 'lease_expired')) NOT VALID;
 `
@@ -108,7 +108,7 @@ CREATE OR REPLACE TRIGGER livewire_notify_update AFTER UPDATE ON govengers_jobs
         OR OLD.error_class IS DISTINCT FROM NEW.error_class
         OR OLD.progress IS DISTINCT FROM NEW.progress
         OR OLD.progress_message IS DISTINCT FROM NEW.progress_message
-        OR OLD.result IS DISTINCT FROM NEW.result
+        OR OLD.result::text IS DISTINCT FROM NEW.result::text -- json has no equality
         OR OLD.started_at IS DISTINCT FROM NEW.started_at
         OR OLD.finished_at IS DISTINCT FROM NEW.finished_at
     )

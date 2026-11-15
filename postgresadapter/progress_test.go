@@ -228,7 +228,7 @@ func TestMigrationV2ChecksTheNewColumns(t *testing.T) {
 		"UPDATE govengers_jobs SET progress = 'NaN' WHERE id = $1",
 		"UPDATE govengers_jobs SET error_class = 'unknown' WHERE id = $1",
 		"UPDATE govengers_jobs SET progress_message = repeat('x', 201) WHERE id = $1",
-		"UPDATE govengers_jobs SET result = to_jsonb(array_fill(0, ARRAY[50000])) WHERE id = $1", // 600 KB of jsonb
+		"UPDATE govengers_jobs SET result = to_json(repeat('x', 65535)) WHERE id = $1", // 65537 bytes of JSON
 	} {
 		_, err := pool.Exec(ctx, statement, id)
 		require.Error(t, err, statement)

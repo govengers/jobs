@@ -1,7 +1,6 @@
 package jobs
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,10 +26,9 @@ var (
 	ErrNoAttempt = errors.New("jobs: not inside a job attempt")
 	// ErrResultTooLarge is returned by SetResult for a result above MaximumResultBytes.
 	ErrResultTooLarge = errors.New("jobs: result too large")
-	// ErrResultNotStorable is returned by SetResult for a result PostgreSQL's jsonb refuses: a
-	// string with a NUL character (the JSON escape \u0000), or bytes that are not UTF-8 in a
-	// json.RawMessage or a json.Marshaler's output.
-	ErrResultNotStorable = errors.New("jobs: result holds a NUL character or invalid UTF-8")
+	// ErrResultNotStorable is returned by SetResult for a result PostgreSQL's text refuses:
+	// bytes that are not UTF-8 in a json.RawMessage or a json.Marshaler's output.
+	ErrResultNotStorable = errors.New("jobs: result holds invalid UTF-8")
 )
 
 // Progress is how far a running attempt got, as a handler reports it with ReportProgress.
@@ -65,9 +63,10 @@ func ReportProgress(ctx context.Context, progress Progress) error {
 // SetResult attaches value, encoded as JSON, to the attempt ctx belongs to; the store keeps it
 // once the job completed, and the admin reads return it. A later call replaces an earlier
 // one; a result of a failed attempt is dropped. It returns ErrNoAttempt outside an attempt,
-// ErrResultTooLarge above MaximumResultBytes, ErrResultNotStorable for a NUL character or
-// invalid UTF-8, and the encoding error for a value json.Marshal refuses. A value that encodes
-// as JSON null removes the result.
+// ErrResultTooLarge above MaximumResultBytes, ErrResultNotStorable for invalid UTF-8, and the
+// encoding error for a value json.Marshal refuses. A value that encodes as JSON null removes the
+// result. The store keeps the encoded text as it is (J60), so a relayed body with a lone
+// surrogate escape, \u0000 or a number beyond float64 is stored and read back unchanged.
 //
 // Every error but ErrNoAttempt is deterministic: a handler that returns it fails the attempt,
 // and the retries repeat the handler's work and fail again. For a result that is optional, drop
@@ -84,28 +83,13 @@ func SetResult(ctx context.Context, value any) error {
 	if len(encoded) > MaximumResultBytes {
 		return fmt.Errorf("%w: %d bytes, at most %d", ErrResultTooLarge, len(encoded), MaximumResultBytes)
 	}
-	if !utf8.Valid(encoded) || escapesNUL(encoded) {
+	if !utf8.Valid(encoded) {
 		return ErrResultNotStorable
 	}
 	if string(encoded) == "null" {
 		encoded = nil
 	}
 	return output.setResult(encoded)
-}
-
-// escapesNUL reports whether the JSON encoded holds the escape \u0000, which jsonb refuses.
-// An escaped backslash before "u0000" is text, not the escape, so escapes are skipped whole.
-func escapesNUL(encoded []byte) bool {
-	for index := 0; index < len(encoded); index++ {
-		if encoded[index] != '\\' {
-			continue
-		}
-		if bytes.HasPrefix(encoded[index+1:], []byte("u0000")) {
-			return true
-		}
-		index++ // the escaped character
-	}
-	return false
 }
 
 // storableText is text as a PostgreSQL text column takes it: valid UTF-8 without NUL characters.

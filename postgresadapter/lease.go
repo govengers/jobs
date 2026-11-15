@@ -91,7 +91,7 @@ UPDATE govengers_jobs SET
     error_class = COALESCE(NULLIF($7::text, ''), error_class),
     progress = CASE WHEN $8::boolean THEN $9::double precision ELSE progress END,
     progress_message = CASE WHEN $8::boolean THEN NULLIF($10::text, '') ELSE progress_message END,
-    result = CASE WHEN $3::text = 'completed' THEN $11::jsonb ELSE result END,
+    result = CASE WHEN $3::text = 'completed' THEN $11::json ELSE result END,
     finished_at = CASE WHEN $3::text = 'pending' AND NOT cancel_requested THEN NULL ELSE now() END,
     lease_token = NULL,
     lease_until = NULL,

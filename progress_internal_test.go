@@ -168,9 +168,8 @@ func TestSetResultEncodesCapsAndReplaces(t *testing.T) {
 	require.JSONEq(t, `{"pages": 2}`, string(result))
 
 	ctx, output = withAttemptOutput(context.Background(), func(Progress) {}, time.Second)
-	require.ErrorIs(t, SetResult(ctx, "a\x00b"), ErrResultNotStorable, "jsonb refuses the escape \\u0000")
 	require.ErrorIs(t, SetResult(ctx, json.RawMessage("\"\xff\"")), ErrResultNotStorable)
-	require.NoError(t, SetResult(ctx, `a\u0000b`), "an escaped backslash before u0000 is text")
+	require.NoError(t, SetResult(ctx, "a\x00b"), "the json column stores the escape \\u0000")
 	require.NoError(t, SetResult(ctx, map[string]int{"pages": 1}))
 	require.NoError(t, SetResult(ctx, nil))
 	_, result = output.close()

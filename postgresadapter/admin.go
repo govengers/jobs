@@ -142,7 +142,7 @@ func (s *Store) ListViewsOn(ctx context.Context, querier Querier, ids []uuid.UUI
 }
 
 // listColumns are recordColumns without the result.
-var listColumns = strings.Replace(recordColumns, " result,", " NULL::jsonb,", 1)
+var listColumns = strings.Replace(recordColumns, " result,", " NULL::json,", 1)
 
 func viewsOn(ctx context.Context, querier Querier, columns string, ids []uuid.UUID) (map[uuid.UUID]View, error) {
 	rows, err := querier.Query(ctx, "SELECT "+columns+" FROM govengers_jobs WHERE id = ANY($1)", ids)
