@@ -135,6 +135,7 @@ type recordingObserver struct {
 	mutex      sync.Mutex
 	outcomes   []jobs.Outcome
 	operations map[jobs.OperationName]int
+	failures   map[jobs.OperationName]int // operations with an error
 }
 
 func (o *recordingObserver) AttemptFinished(outcome *jobs.Outcome) {
@@ -147,9 +148,18 @@ func (o *recordingObserver) OperationFinished(operation *jobs.Operation) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
 	if o.operations == nil {
-		o.operations = map[jobs.OperationName]int{}
+		o.operations, o.failures = map[jobs.OperationName]int{}, map[jobs.OperationName]int{}
 	}
 	o.operations[operation.Name]++
+	if operation.Err != nil {
+		o.failures[operation.Name]++
+	}
+}
+
+func (o *recordingObserver) failed(name jobs.OperationName) int {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+	return o.failures[name]
 }
 
 func (o *recordingObserver) results() []jobs.Result {

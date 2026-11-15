@@ -165,7 +165,7 @@ func (s *Store) Cancel(ctx context.Context, id uuid.UUID) error {
 // CancelOn is Cancel on executor, usually the caller's transaction, so the cancellation commits
 // or rolls back with the caller's change.
 func (s *Store) CancelOn(ctx context.Context, executor Executor, id uuid.UUID) error {
-	return updateOne(ctx, executor, cancelJob, id, ErrFinished, "cancel")
+	return updateOne(ctx, executor, cancelUpdate, id)
 }
 
 // retryJob starts a dead job over: its attempts, its last error with its class, its progress,
@@ -194,25 +194,38 @@ func (s *Store) Retry(ctx context.Context, id uuid.UUID) error {
 
 // RetryOn is Retry on executor, usually the caller's transaction.
 func (s *Store) RetryOn(ctx context.Context, executor Executor, id uuid.UUID) error {
-	return updateOne(ctx, executor, retryJob, id, ErrNotDead, "retry")
+	return updateOne(ctx, executor, retryUpdate, id)
 }
 
-// updateOne runs an admin update of the job with id and tells a missing job (ErrNotFound) from
-// one in the wrong status when it matched no row.
-func updateOne(ctx context.Context, executor Executor, statement string, id uuid.UUID, wrongStatus error, operation string) error {
+// adminUpdate is one admin operation that updates a job: its statement, the error of a job in
+// a status the statement does not change, and its name for the errors.
+type adminUpdate struct {
+	statement   string
+	wrongStatus error
+	name        string
+}
+
+var (
+	cancelUpdate = adminUpdate{statement: cancelJob, wrongStatus: ErrFinished, name: "cancel"}
+	retryUpdate  = adminUpdate{statement: retryJob, wrongStatus: ErrNotDead, name: "retry"}
+)
+
+// updateOne runs update on the job with id and tells a missing job (ErrNotFound) from one in
+// the wrong status when it matched no row.
+func updateOne(ctx context.Context, executor Executor, update adminUpdate, id uuid.UUID) error {
 	var updated uuid.UUID
-	err := executor.QueryRow(ctx, statement+" RETURNING id", id).Scan(&updated)
+	err := executor.QueryRow(ctx, update.statement+" RETURNING id", id).Scan(&updated)
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return wrapDriverError(err, "%s job %s", operation, id)
+		return wrapDriverError(err, "%s job %s", update.name, id)
 	}
 	var exists bool
 	if err := executor.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM govengers_jobs WHERE id = $1)", id).Scan(&exists); err != nil {
-		return wrapDriverError(err, "%s job %s", operation, id)
+		return wrapDriverError(err, "%s job %s", update.name, id)
 	}
 	if !exists {
-		return fmt.Errorf("%s job %s: %w", operation, id, ErrNotFound)
+		return fmt.Errorf("%s job %s: %w", update.name, id, ErrNotFound)
 	}
-	return fmt.Errorf("%s job %s: %w", operation, id, wrongStatus)
+	return fmt.Errorf("%s job %s: %w", update.name, id, update.wrongStatus)
 }
 
 const queueDepths = `

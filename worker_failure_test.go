@@ -19,10 +19,11 @@ import (
 // faultyStore is the Postgres store with single operations replaced by a test.
 type faultyStore struct {
 	*postgresadapter.Store
-	claim        func(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error)
-	extendLeases func(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error)
-	finish       func(ctx context.Context, finish *jobs.Finish) (jobs.Status, error)
-	schedule     func(ctx context.Context, schedule jobs.Schedule) (bool, error)
+	claim         func(ctx context.Context, request *jobs.ClaimRequest) ([]*jobs.Claim, error)
+	extendLeases  func(ctx context.Context, leases []jobs.Lease, duration time.Duration) ([]jobs.HeldLease, error)
+	finish        func(ctx context.Context, finish *jobs.Finish) (jobs.Status, error)
+	writeProgress func(ctx context.Context, lease jobs.Lease, progress jobs.Progress) (bool, error)
+	schedule      func(ctx context.Context, schedule jobs.Schedule) (bool, error)
 }
 
 func (s *faultyStore) EnqueueDueSchedule(ctx context.Context, schedule jobs.Schedule) (bool, error) {
@@ -44,6 +45,13 @@ func (s *faultyStore) ExtendLeases(ctx context.Context, leases []jobs.Lease, dur
 		return s.extendLeases(ctx, leases, duration)
 	}
 	return s.Store.ExtendLeases(ctx, leases, duration)
+}
+
+func (s *faultyStore) WriteProgress(ctx context.Context, lease jobs.Lease, progress jobs.Progress) (bool, error) {
+	if s.writeProgress != nil {
+		return s.writeProgress(ctx, lease, progress)
+	}
+	return s.Store.WriteProgress(ctx, lease, progress)
 }
 
 func (s *faultyStore) Finish(ctx context.Context, finish *jobs.Finish) (jobs.Status, error) {

@@ -70,6 +70,13 @@ func Main(m *testing.M) {
 // the test starts.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	return NewMigrated(t, postgresadapter.MigrationV1, postgresadapter.MigrationV2)
+}
+
+// NewMigrated is New with the given migrations instead of every migration of the module, for
+// the tests of an upgrade.
+func NewMigrated(t *testing.T, migrations ...string) *pgxpool.Pool {
+	t.Helper()
 	instance.once.Do(instance.start)
 	if instance.err != nil {
 		t.Fatalf("start the test PostgreSQL: %v", instance.err)
@@ -90,7 +97,7 @@ func New(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		dropSchema(t, schema)
 	})
-	for _, migration := range []string{postgresadapter.MigrationV1, postgresadapter.MigrationV2} {
+	for _, migration := range migrations {
 		if _, err := pool.Exec(ctx, migration); err != nil {
 			t.Fatalf("apply the migrations: %v", err)
 		}
