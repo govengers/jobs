@@ -11,7 +11,8 @@ import (
 	"github.com/govengers/jobs/postgresadapter"
 )
 
-// MigrationUsers creates the users table; it runs after postgresadapter.MigrationV1.
+// MigrationUsers creates the users table; it runs after postgresadapter.MigrationV1 and
+// MigrationV2.
 const MigrationUsers = `
 CREATE TABLE users (
     id                   uuid PRIMARY KEY DEFAULT uuidv4(),
@@ -35,7 +36,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("begin migration: %w", err)
 	}
 	defer func() { _ = transaction.Rollback(ctx) }() // a no-op after Commit
-	for _, migration := range []string{postgresadapter.MigrationV1, MigrationUsers} {
+	for _, migration := range []string{postgresadapter.MigrationV1, postgresadapter.MigrationV2, MigrationUsers} {
 		if _, err := transaction.Exec(ctx, migration); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}

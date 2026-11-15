@@ -50,22 +50,25 @@ func (s *UserService) SignUp(ctx context.Context, input *model.SignUpInput) (*mo
 	return s.repository.Create(ctx, normalized)
 }
 
-// SendWelcomeMail sends the user's welcome mail unless it was sent already. Running it twice
-// sends one mail: a finished send is recorded, and a send whose record was lost carries the
-// same idempotency key, so the provider drops the duplicate (JOB-003).
-func (s *UserService) SendWelcomeMail(ctx context.Context, userID uuid.UUID) error {
+// SendWelcomeMail sends the user's welcome mail unless it was sent already, and reports
+// whether this call sent it. Running it twice sends one mail: a finished send is recorded, and
+// a send whose record was lost carries the same idempotency key, so the provider drops the
+// duplicate (JOB-003).
+func (s *UserService) SendWelcomeMail(ctx context.Context, userID uuid.UUID) (*model.WelcomeMailResult, error) {
 	user, err := s.repository.Get(ctx, userID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if user.WelcomeMailSentAt != nil {
-		return nil
+		return &model.WelcomeMailResult{Sent: false}, nil
 	}
 	if err := s.mailSender.Send(ctx, welcomeMail(user)); err != nil {
-		return fmt.Errorf("send the welcome mail of user %s: %w", user.ID, err)
+		return nil, fmt.Errorf("send the welcome mail of user %s: %w", user.ID, err)
 	}
-	_, err = s.repository.MarkWelcomeMailSent(ctx, user.ID)
-	return err
+	if _, err := s.repository.MarkWelcomeMailSent(ctx, user.ID); err != nil {
+		return nil, err
+	}
+	return &model.WelcomeMailResult{Sent: true}, nil
 }
 
 // validateSignUp is the sign-up rule as a pure function (FUN-005).
