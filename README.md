@@ -63,7 +63,10 @@ A long job reports how far it got and what it produced:
 
 ```go
 _ = jobs.ReportProgress(ctx, jobs.Progress{Fraction: 0.4, Message: "page 4 of 10"}) // never blocks
-return jobs.SetResult(ctx, RenderResult{FileID: file.ID})                          // kept once completed
+if err := jobs.SetResult(ctx, RenderResult{FileID: file.ID}); err != nil { // kept once completed
+    return jobs.Permanent(err) // deterministic: a retry would fail again
+}
+return nil
 ```
 
 `SetResult`'s errors (too large, not storable, not encodable) are deterministic: returned from the handler they fail the attempt, and every retry repeats the work. Drop the error for an optional result, or wrap it with `jobs.Permanent`.
