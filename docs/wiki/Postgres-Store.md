@@ -46,4 +46,4 @@ Build the admin view of your service on these, or declare `livewireadapter`'s li
 
 ## Errors
 
-Driver errors are wrapped as text (LIB-010); match only the sentinels: `ErrNotFound`, `ErrFinished`, `ErrNotDead`, `ErrSerializationFailure` and `jobs.ErrInvalidKind`; `jobs.ErrNoAttempt` and `jobs.ErrResultTooLarge` come from `jobs.SetResult`.
+Driver errors are wrapped as text (LIB-010); match only the sentinels: `ErrNotFound`, `ErrFinished`, `ErrNotDead`, `ErrSerializationFailure` and `jobs.ErrInvalidKind`; `jobs.ErrNoAttempt`, `jobs.ErrResultTooLarge` and `jobs.ErrResultNotStorable` come from `jobs.SetResult`.

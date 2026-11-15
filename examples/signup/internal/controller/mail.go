@@ -44,5 +44,8 @@ func (c *MailJobController) sendWelcomeMail(ctx context.Context, job *jobs.Job[m
 	if err != nil {
 		return err
 	}
-	return jobs.SetResult(ctx, result)
+	// The mail went out: a result that cannot be kept is not worth a retry, which would send it
+	// again (SetResult's errors are deterministic).
+	_ = jobs.SetResult(ctx, result)
+	return nil
 }

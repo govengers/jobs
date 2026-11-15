@@ -66,6 +66,8 @@ _ = jobs.ReportProgress(ctx, jobs.Progress{Fraction: 0.4, Message: "page 4 of 10
 return jobs.SetResult(ctx, RenderResult{FileID: file.ID})                          // kept once completed
 ```
 
+`SetResult`'s errors (too large, not storable, not encodable) are deterministic: returned from the handler they fail the attempt, and every retry repeats the work. Drop the error for an optional result, or wrap it with `jobs.Permanent`.
+
 The tables come from `postgresadapter.MigrationV1` and `MigrationV2`, which you run from your goose migrations. Nothing runs DDL at startup.
 
 ## Packages
