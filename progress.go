@@ -1,11 +1,13 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -25,6 +27,10 @@ var (
 	ErrNoAttempt = errors.New("jobs: not inside a job attempt")
 	// ErrResultTooLarge is returned by SetResult for a result above MaximumResultBytes.
 	ErrResultTooLarge = errors.New("jobs: result too large")
+	// ErrResultNotStorable is returned by SetResult for a result PostgreSQL's jsonb refuses: a
+	// string with a NUL character (the JSON escape \u0000), or bytes that are not UTF-8 in a
+	// json.RawMessage or a json.Marshaler's output.
+	ErrResultNotStorable = errors.New("jobs: result holds a NUL character or invalid UTF-8")
 )
 
 // Progress is how far a running attempt got, as a handler reports it with ReportProgress.
@@ -37,7 +43,9 @@ type Progress struct {
 // database: the worker writes the latest report in the background, at most once per queue's
 // ProgressInterval and fenced by the attempt's lease, so a handler may report as often as it
 // likes; the report left unwritten when the handler returns is written with the attempt's
-// outcome. A message longer than MaximumProgressMessageLength characters is cut. Each claim
+// outcome. The store keeps the message as valid UTF-8 without NUL characters: NUL characters
+// are dropped and invalid bytes become U+FFFD, so a file name or a row of foreign data never
+// fails a write. A message longer than MaximumProgressMessageLength characters is cut. Each claim
 // of the job clears the progress of the attempt before. Outside an attempt, and after its
 // handler returned, it does nothing, so code shared with other callers may report freely. It
 // returns an error only for a fraction outside 0 to 1, or NaN.
@@ -49,7 +57,7 @@ func ReportProgress(ctx context.Context, progress Progress) error {
 	if !ok {
 		return nil
 	}
-	progress.Message = truncate(progress.Message, MaximumProgressMessageLength)
+	progress.Message = truncate(storableText(progress.Message), MaximumProgressMessageLength)
 	output.report(progress)
 	return nil
 }
@@ -57,8 +65,13 @@ func ReportProgress(ctx context.Context, progress Progress) error {
 // SetResult attaches value, encoded as JSON, to the attempt ctx belongs to; the store keeps it
 // once the job completed, and the admin reads return it. A later call replaces an earlier
 // one; a result of a failed attempt is dropped. It returns ErrNoAttempt outside an attempt,
-// ErrResultTooLarge above MaximumResultBytes and the encoding error for a value json.Marshal
-// refuses. A value that encodes as JSON null removes the result.
+// ErrResultTooLarge above MaximumResultBytes, ErrResultNotStorable for a NUL character or
+// invalid UTF-8, and the encoding error for a value json.Marshal refuses. A value that encodes
+// as JSON null removes the result.
+//
+// Every error but ErrNoAttempt is deterministic: a handler that returns it fails the attempt,
+// and the retries repeat the handler's work and fail again. For a result that is optional, drop
+// the error; otherwise return it wrapped with Permanent.
 func SetResult(ctx context.Context, value any) error {
 	output, ok := ctx.Value(attemptOutputKey{}).(*attemptOutput)
 	if !ok {
@@ -71,10 +84,33 @@ func SetResult(ctx context.Context, value any) error {
 	if len(encoded) > MaximumResultBytes {
 		return fmt.Errorf("%w: %d bytes, at most %d", ErrResultTooLarge, len(encoded), MaximumResultBytes)
 	}
+	if !utf8.Valid(encoded) || escapesNUL(encoded) {
+		return ErrResultNotStorable
+	}
 	if string(encoded) == "null" {
 		encoded = nil
 	}
 	return output.setResult(encoded)
+}
+
+// escapesNUL reports whether the JSON encoded holds the escape \u0000, which jsonb refuses.
+// An escaped backslash before "u0000" is text, not the escape, so escapes are skipped whole.
+func escapesNUL(encoded []byte) bool {
+	for index := 0; index < len(encoded); index++ {
+		if encoded[index] != '\\' {
+			continue
+		}
+		if bytes.HasPrefix(encoded[index+1:], []byte("u0000")) {
+			return true
+		}
+		index++ // the escaped character
+	}
+	return false
+}
+
+// storableText is text as a PostgreSQL text column takes it: valid UTF-8 without NUL characters.
+func storableText(text string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(text, "\x00", ""), "\uFFFD")
 }
 
 func truncate(text string, characters int) string {

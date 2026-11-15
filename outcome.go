@@ -111,13 +111,13 @@ type Finish struct {
 	Delay  time.Duration // pending: the job is claimable again after Delay
 	// ReturnAttempt gives the attempt back (snooze, release): it does not count towards MaximumAttempts.
 	ReturnAttempt bool
-	Error         string     // recorded as the job's last error; empty keeps the previous one
+	Error         string     // recorded as the job's last error, valid UTF-8 without NUL; empty keeps the previous one
 	ErrorClass    ErrorClass // recorded with Error; empty keeps the previous one
 	// Progress is the attempt's last progress report that no background write took; nil keeps
-	// the stored progress.
+	// the stored progress. Its message is valid UTF-8 without NUL (ReportProgress ensures it).
 	Progress *Progress
 	// Result is stored when Status is completed: the JSON the handler set with SetResult, nil
-	// for none.
+	// for none; at most MaximumResultBytes, UTF-8, without the escape \u0000.
 	Result json.RawMessage
 }
 
@@ -133,7 +133,7 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 		finish.Status = StatusCompleted
 		return finish, ResultCompleted
 	}
-	finish.Error, finish.ErrorClass = handlerError.Error(), ErrorClassTransient
+	finish.Error, finish.ErrorClass = storableText(handlerError.Error()), ErrorClassTransient
 	if IsPermanent(handlerError) {
 		finish.ErrorClass = ErrorClassPermanent
 	}

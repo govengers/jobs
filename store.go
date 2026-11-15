@@ -19,7 +19,7 @@ type Store interface {
 	// empty status means the lease was no longer held and nothing was written.
 	Finish(ctx context.Context, finish *Finish) (Status, error)
 	// WriteProgress stores progress on the job of lease if the lease is still held, and reports
-	// whether it did (J54).
+	// whether it did (J54). The message is valid UTF-8 without NUL (ReportProgress ensures it).
 	WriteProgress(ctx context.Context, lease Lease, progress Progress) (bool, error)
 	// Rescue returns up to limit running jobs whose lease expired to pending, or to dead when
 	// their attempts are used up; the lost attempt counts. It returns how many it moved.

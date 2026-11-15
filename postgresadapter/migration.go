@@ -70,13 +70,15 @@ ALTER TABLE govengers_jobs
     ADD COLUMN error_class text,
     ADD COLUMN started_at timestamptz;
 
--- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked
+-- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked.
+-- The result bound is 8 times jobs.MaximumResultBytes: jsonb stores a one-digit number in 12
+-- bytes, 6 times its 2 bytes of JSON text, so every result SetResult accepts fits.
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress
     CHECK (progress >= 0 AND progress <= 1) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress_message
     CHECK (char_length(progress_message) <= 200) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_result
-    CHECK (pg_column_size(result) <= 262144) NOT VALID;
+    CHECK (pg_column_size(result) <= 524288) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
     CHECK (error_class IN ('transient', 'permanent', 'lease_expired')) NOT VALID;
 `
@@ -85,8 +87,9 @@ ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
 // user interface shows, so a live subscription of a resource that lists the table re-runs
 // (J56). Use it instead of livewire's TriggerSQL("govengers_jobs"), after livewire's
 // TriggerFunctionSQL, in a goose migration after MigrationV2. An insert, a delete and a
-// TRUNCATE always notify; an update notifies only when a column of View changed, so a lease
-// extension of the heartbeat, which runs every lease/3 for every running job, notifies nothing.
+// TRUNCATE always notify; an update notifies only when a column of View other than UpdatedAt
+// changed, so a lease extension of the heartbeat, which runs every lease/3 for every running
+// job and moves updated_at, notifies nothing.
 // Every claim, finish and progress write still notifies: on a busy queue the subscriptions of
 // the table re-run often (livewire coalesces them per subscription).
 const LivewireTriggerSQL = `

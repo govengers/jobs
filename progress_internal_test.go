@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -139,6 +140,13 @@ func TestReportProgressValidatesAndCutsTheMessage(t *testing.T) {
 	})
 }
 
+// The store keeps text as valid UTF-8 without NUL, so a message from foreign data is written.
+func TestStorableTextDropsNULAndReplacesInvalidBytes(t *testing.T) {
+	require.Equal(t, "ab.csv", storableText("a\x00b.csv"))
+	require.Equal(t, "M\uFFFDller", storableText("M\xfcller"))
+	require.Equal(t, "Müller", storableText("Müller"))
+}
+
 func nan() float64 {
 	zero := 0.0
 	return zero / zero
@@ -160,6 +168,9 @@ func TestSetResultEncodesCapsAndReplaces(t *testing.T) {
 	require.JSONEq(t, `{"pages": 2}`, string(result))
 
 	ctx, output = withAttemptOutput(context.Background(), func(Progress) {}, time.Second)
+	require.ErrorIs(t, SetResult(ctx, "a\x00b"), ErrResultNotStorable, "jsonb refuses the escape \\u0000")
+	require.ErrorIs(t, SetResult(ctx, json.RawMessage("\"\xff\"")), ErrResultNotStorable)
+	require.NoError(t, SetResult(ctx, `a\u0000b`), "an escaped backslash before u0000 is text")
 	require.NoError(t, SetResult(ctx, map[string]int{"pages": 1}))
 	require.NoError(t, SetResult(ctx, nil))
 	_, result = output.close()
