@@ -63,9 +63,7 @@ type testApplication struct {
 // newApplication wires the example like its main does, on a fresh database and a fake mail sender.
 func newApplication(t *testing.T) *testApplication {
 	t.Helper()
-	pool := postgrestest.New(t)
-	_, err := pool.Exec(t.Context(), database.MigrationUsers)
-	require.NoError(t, err)
+	pool := postgrestest.NewMigrated(t, postgresadapter.MigrationV1, postgresadapter.MigrationV2, database.MigrationUsers)
 	jobStore, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
 	require.NoError(t, err)
 	userRepository, err := repository.NewUserRepository(&repository.UserRepositoryOptions{Pool: pool, JobStore: jobStore})

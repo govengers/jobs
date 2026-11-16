@@ -30,7 +30,8 @@ var (
 	others sync.Map
 )
 
-// Main runs the package's tests, stops the PostgreSQL and fails on leaked goroutines (TST-009).
+// Main runs the package's tests, closes the server (which stops the PostgreSQL this binary started,
+// not the one of POSTGRESTEST_URL) and fails on leaked goroutines (TST-009).
 func Main(m *testing.M) { goleak.VerifyTestMain(server.Main(m)) }
 
 // New returns a pool on a fresh database of the test PostgreSQL with postgresadapter.MigrationV1
@@ -42,8 +43,8 @@ func New(t *testing.T) *pgxpool.Pool {
 	return server.Pool(t)
 }
 
-// NewMigrated is New with the given migrations instead of every migration of the module, for
-// the tests of an upgrade. Each set of migrations gets its own template on the same PostgreSQL.
+// NewMigrated is New with the given migrations instead of every migration of the module: the
+// tests of an upgrade, an example with its own tables, or none for an empty database. Each set of migrations gets its own template on the same PostgreSQL.
 func NewMigrated(t *testing.T, migrations ...string) *pgxpool.Pool {
 	t.Helper()
 	key := strings.Join(migrations, "\x00")

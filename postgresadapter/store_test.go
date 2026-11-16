@@ -652,3 +652,33 @@ func TestAPanickingNextIsTheSchedulesError(t *testing.T) {
 	require.ErrorContains(t, err, "schedule broken")
 	require.ErrorContains(t, err, "Next panicked: bad next")
 }
+
+// The store reaches its tables through the pool's search_path (Options.Pool), not through public.
+func TestTheStoreWorksInTheSchemaOfTheSearchPath(t *testing.T) {
+	ctx := context.Background()
+	empty := postgrestest.NewMigrated(t)
+	_, err := empty.Exec(ctx, "CREATE SCHEMA tenant")
+	require.NoError(t, err)
+	config := empty.Config().Copy()
+	config.ConnConfig.RuntimeParams["search_path"] = "tenant"
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	for _, migration := range []string{postgresadapter.MigrationV1, postgresadapter.MigrationV2} {
+		_, err = pool.Exec(ctx, migration)
+		require.NoError(t, err)
+	}
+	var inPublic bool
+	require.NoError(t, pool.QueryRow(ctx, "SELECT to_regclass('public.govengers_jobs') IS NOT NULL").Scan(&inPublic))
+	require.False(t, inPublic)
+	store, err := postgresadapter.New(&postgresadapter.Options{Pool: pool})
+	require.NoError(t, err)
+
+	id := enqueue(t, store, pool, nil)
+	claim := claimOne(t, store, lease)
+	stored, err := store.Finish(ctx, &jobs.Finish{Lease: claim.Lease, Status: jobs.StatusCompleted})
+
+	require.NoError(t, err)
+	require.Equal(t, jobs.StatusCompleted, stored)
+	require.Equal(t, jobs.StatusCompleted, get(t, store, id).Status)
+}
