@@ -19,9 +19,9 @@ import (
 // changes of a job's life notify in the shape of livewire's trigger function, without that
 // function installed, a lease extension does not. The notifications are received through
 // livewire's own Listener, whose strict decode drops a payload of another shape and reports
-// it to OnError, so a drift between the two modules fails here. Other tests of the binary
-// share the database and its channel, so the changes are taken by the job's id until a
-// sentinel change of this test arrives, which commits after every write below.
+// it to OnError, so a drift between the two modules fails here. The changes are taken until a
+// sentinel change of this test arrives, which commits after every write below; the test's
+// database is its own, so its channel carries no other test's changes.
 func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 	fixture := newOperatorFixture(t)
 	ctx := context.Background()

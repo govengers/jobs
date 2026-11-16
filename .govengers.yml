@@ -1,6 +1,8 @@
 profile: library
 exceptions:
   - rule: DES-003
-    reason: internal/postgrestest keeps the one embedded PostgreSQL of a test binary in a package variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers away from. Test code only; the library has no mutable package state.
+    reason: internal/postgrestest keeps the github.com/govengers/postgrestest Server of a test binary (its one PostgreSQL and template) in a package variable. TestMain has no other channel to the tests, and a server per test is the slow path TST-002 steers away from. Test code only; the library has no mutable package state.
+  - rule: TST-013
+    reason: '`just test` runs the unit tests through the launcher of github.com/govengers/postgrestest, which starts one PostgreSQL for the run and hands it to every test binary through POSTGRESTEST_URL (J62). The server is started by that run for its tests alone and is new per run, each test gets its own database copied from a template of this module''s migrations, and the URL is a stable test cache input; the reasons of TST-013 hold. A test binary run without the launcher starts its own embedded PostgreSQL.'
   - rule: LIB-001
     reason: jobs.Store and jobs.Observer announce in their doc comments that they may gain methods in minor versions (J51, MaPa 31.10.2026). Adding such a method breaks an implementation outside this module, which LIB-001 would count as a breaking minor; the documented policy makes it part of the v1 contract instead. Every other exported API follows LIB-001.
