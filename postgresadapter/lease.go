@@ -30,6 +30,9 @@ UPDATE govengers_jobs AS job SET
     lease_until = now() + $3::bigint * interval '1 microsecond',
     worker = $4,
     unique_key = NULL,
+    started_at = now(),
+    progress = NULL,
+    progress_message = NULL,
     updated_at = now()
 FROM next
 WHERE job.id = next.id
@@ -77,13 +80,18 @@ func (s *Store) ExtendLeases(ctx context.Context, leases []jobs.Lease, duration 
 }
 
 // finishJob ends an attempt. A pending result of a job whose cancellation was requested
-// becomes cancelled; the CHECK on lease_token holds because every result leaves running.
+// becomes cancelled; the CHECK on lease_token holds because every result leaves running. The
+// result is kept only by a completed job; $8 says whether $9 and $10 carry progress.
 const finishJob = `
 UPDATE govengers_jobs SET
     status = CASE WHEN $3::text = 'pending' AND cancel_requested THEN 'cancelled' ELSE $3::text END,
     run_at = CASE WHEN $3::text = 'pending' THEN now() + $4::bigint * interval '1 microsecond' ELSE run_at END,
     attempt = CASE WHEN $5::boolean THEN attempt - 1 ELSE attempt END,
     last_error = COALESCE(NULLIF($6::text, ''), last_error),
+    error_class = COALESCE(NULLIF($7::text, ''), error_class),
+    progress = CASE WHEN $8::boolean THEN $9::double precision ELSE progress END,
+    progress_message = CASE WHEN $8::boolean THEN NULLIF($10::text, '') ELSE progress_message END,
+    result = CASE WHEN $3::text = 'completed' THEN $11::json ELSE result END,
     finished_at = CASE WHEN $3::text = 'pending' AND NOT cancel_requested THEN NULL ELSE now() END,
     lease_token = NULL,
     lease_until = NULL,
@@ -95,7 +103,13 @@ RETURNING status`
 // Finish implements jobs.Store.
 func (s *Store) Finish(ctx context.Context, finish *jobs.Finish) (jobs.Status, error) {
 	var stored jobs.Status
-	err := s.pool.QueryRow(ctx, finishJob, finish.Lease.JobID, finish.Lease.Token, string(finish.Status), finish.Delay.Microseconds(), finish.ReturnAttempt, finish.Error).Scan(&stored)
+	progress := finish.Progress
+	if progress == nil {
+		progress = &jobs.Progress{}
+	}
+	err := s.pool.QueryRow(ctx, finishJob, finish.Lease.JobID, finish.Lease.Token, string(finish.Status), finish.Delay.Microseconds(),
+		finish.ReturnAttempt, finish.Error, string(finish.ErrorClass), finish.Progress != nil, progress.Fraction, progress.Message,
+		[]byte(finish.Result)).Scan(&stored)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return "", nil // the lease is no longer held
@@ -104,6 +118,19 @@ func (s *Store) Finish(ctx context.Context, finish *jobs.Finish) (jobs.Status, e
 	default:
 		return stored, nil
 	}
+}
+
+const writeProgress = `
+UPDATE govengers_jobs SET progress = $3, progress_message = NULLIF($4, ''), updated_at = now()
+WHERE id = $1 AND lease_token = $2 AND status = 'running'`
+
+// WriteProgress implements jobs.Store.
+func (s *Store) WriteProgress(ctx context.Context, lease jobs.Lease, progress jobs.Progress) (bool, error) {
+	tag, err := s.pool.Exec(ctx, writeProgress, lease.JobID, lease.Token, progress.Fraction, progress.Message)
+	if err != nil {
+		return false, wrapDriverError(err, "write the progress of job %s", lease.JobID)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // rescueJobs returns jobs whose lease expired. The attempt the lost lease belonged to counts,
@@ -124,6 +151,7 @@ UPDATE govengers_jobs AS job SET
     END,
     run_at = now(),
     last_error = 'lease expired: the worker stopped without finishing the job',
+    error_class = 'lease_expired',
     finished_at = CASE WHEN job.cancel_requested OR job.attempt >= job.maximum_attempts THEN now() END,
     lease_token = NULL,
     lease_until = NULL,

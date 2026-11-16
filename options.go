@@ -17,12 +17,13 @@ func queuesWithDefaults(queues map[string]QueueOptions) (map[string]QueueOptions
 		if name == "" {
 			return nil, errors.New("jobs: a queue needs a name")
 		}
-		if options.Concurrency < 0 || options.LeaseDuration < 0 || options.PollInterval < 0 {
-			return nil, fmt.Errorf("jobs: queue %s: negative concurrency, lease or poll interval", name)
+		if options.Concurrency < 0 || options.LeaseDuration < 0 || options.PollInterval < 0 || options.ProgressInterval < 0 {
+			return nil, fmt.Errorf("jobs: queue %s: negative concurrency, lease, poll or progress interval", name)
 		}
 		options.Concurrency = orDefault(options.Concurrency, DefaultConcurrency)
 		options.LeaseDuration = orDefault(options.LeaseDuration, DefaultLeaseDuration)
 		options.PollInterval = orDefault(options.PollInterval, DefaultPollInterval)
+		options.ProgressInterval = orDefault(options.ProgressInterval, DefaultProgressInterval)
 		if options.LeaseDuration < minimumLeaseDuration {
 			return nil, fmt.Errorf("jobs: queue %s: lease %s is shorter than %s", name, options.LeaseDuration, minimumLeaseDuration)
 		}

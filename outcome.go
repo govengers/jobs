@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -85,6 +86,23 @@ const (
 	ResultFinishFailed Result = "finish_failed"
 )
 
+// ErrorClass says what kind of error a job's last error is (J55); the job's status says what
+// became of the job.
+type ErrorClass string
+
+// The error classes. A dead job with a transient last error used up its attempts.
+const (
+	// ErrorClassTransient is an unclassified handler error or a panic: the job is retried
+	// while it has attempts left.
+	ErrorClassTransient ErrorClass = "transient"
+	// ErrorClassPermanent is an error the handler marked with Permanent, or a payload that did
+	// not decode: no retry can fix it.
+	ErrorClassPermanent ErrorClass = "permanent"
+	// ErrorClassLeaseExpired means the worker stopped without finishing the attempt (a crash,
+	// an out-of-memory kill, a lost database connection) and the rescuer took the job back.
+	ErrorClassLeaseExpired ErrorClass = "lease_expired"
+)
+
 // Finish is the write that ends an attempt. The store applies it only while the lease is
 // still held.
 type Finish struct {
@@ -93,7 +111,14 @@ type Finish struct {
 	Delay  time.Duration // pending: the job is claimable again after Delay
 	// ReturnAttempt gives the attempt back (snooze, release): it does not count towards MaximumAttempts.
 	ReturnAttempt bool
-	Error         string // recorded as the job's last error; empty keeps the previous one
+	Error         string     // recorded as the job's last error, valid UTF-8 without NUL; empty keeps the previous one
+	ErrorClass    ErrorClass // recorded with Error; empty keeps the previous one
+	// Progress is the attempt's last progress report that no background write took; nil keeps
+	// the stored progress. Its message is valid UTF-8 without NUL (ReportProgress ensures it).
+	Progress *Progress
+	// Result is stored when Status is completed: the JSON the handler set with SetResult, nil
+	// for none; at most MaximumResultBytes, UTF-8.
+	Result json.RawMessage
 }
 
 // decide maps how a handler ended to the finish write and the result to report. cause is the
@@ -108,11 +133,14 @@ func decide(claim *Claim, handlerError, cause error, backoff Backoff) (*Finish, 
 		finish.Status = StatusCompleted
 		return finish, ResultCompleted
 	}
-	finish.Error = handlerError.Error()
+	finish.Error, finish.ErrorClass = storableText(handlerError.Error()), ErrorClassTransient
+	if IsPermanent(handlerError) {
+		finish.ErrorClass = ErrorClassPermanent
+	}
 	snoozeDelay, snoozed := SnoozeDelay(handlerError)
 	switch {
 	case snoozed:
-		finish.Status, finish.Delay, finish.ReturnAttempt, finish.Error = StatusPending, snoozeDelay, true, ""
+		finish.Status, finish.Delay, finish.ReturnAttempt, finish.Error, finish.ErrorClass = StatusPending, snoozeDelay, true, "", ""
 		return finish, ResultSnoozed
 	case errors.Is(cause, ErrCancelled):
 		finish.Status = StatusCancelled

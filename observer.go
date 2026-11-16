@@ -32,6 +32,7 @@ const (
 	OperationClaim        OperationName = "claim"
 	OperationExtendLeases OperationName = "extend_leases"
 	OperationFinish       OperationName = "finish"
+	OperationProgress     OperationName = "progress" // a background write of a handler's progress report
 	OperationRescue       OperationName = "rescue"
 	OperationSweep        OperationName = "sweep"
 	OperationSchedules    OperationName = "schedules"
@@ -41,7 +42,7 @@ const (
 type Operation struct {
 	Name     OperationName
 	Queue    string // empty for rescue, sweep and schedules, which cover every queue
-	Count    int    // jobs claimed, leases held, jobs rescued, deleted or enqueued
+	Count    int    // jobs claimed, leases held, jobs finished or given progress, rescued, deleted or enqueued
 	Duration time.Duration
 	Err      error
 }

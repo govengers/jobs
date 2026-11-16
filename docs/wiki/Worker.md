@@ -25,6 +25,7 @@ Register every handler before `Run`. While `Run` runs, `Run`, `RunDue` and `Hand
 | `Concurrency` | 1 | jobs of this queue running at once in this process |
 | `LeaseDuration` | 30 s | how long a claim holds a job without a heartbeat (minimum 30 ms) |
 | `PollInterval` | 1 s | how long an idle queue waits before it looks again; a full batch polls again at once |
+| `ProgressInterval` | 1 s | the shortest time between two progress writes of one attempt ([Progress-and-Results](Progress-and-Results.md)) |
 
 The worker claims only as many jobs as it has free slots, so no claimed job waits in memory while its lease runs out.
 

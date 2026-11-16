@@ -117,7 +117,9 @@ func TestSignUpSendsOneWelcomeMail(t *testing.T) {
 	require.Len(t, mails, 1)
 	require.Equal(t, "ada@example.com", mails[0].To)
 	require.True(t, strings.HasPrefix(mails[0].IdempotencyKey, "welcome-mail:"))
-	require.Equal(t, jobs.StatusCompleted, application.jobs(t)[0].Status)
+	record := application.jobs(t)[0]
+	require.Equal(t, jobs.StatusCompleted, record.Status)
+	require.JSONEq(t, `{"sent": true}`, string(record.Result))
 	require.Equal(t, 0, jobstest.Drain(t, application.worker))
 }
 
@@ -168,9 +170,12 @@ func TestADuplicateDeliverySendsNoSecondMail(t *testing.T) {
 	var delivered model.WelcomeMailPayload
 	require.NoError(t, json.Unmarshal(application.jobs(t)[0].Payload, &delivered))
 
-	_, err := application.jobStore.Enqueue(t.Context(), application.pool, model.WelcomeMailKind.New(delivered, nil))
+	ids, err := application.jobStore.Enqueue(t.Context(), application.pool, model.WelcomeMailKind.New(delivered, nil))
 	require.NoError(t, err)
 	jobstest.Drain(t, application.worker)
 
 	require.Len(t, application.mail.mails(), 1, "at-least-once delivery, one mail (JOB-003)")
+	duplicate, err := application.jobStore.Get(t.Context(), ids[0])
+	require.NoError(t, err)
+	require.JSONEq(t, `{"sent": false}`, string(duplicate.Result), "the duplicate found the mail sent")
 }

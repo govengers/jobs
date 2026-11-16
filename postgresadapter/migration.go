@@ -52,3 +52,91 @@ CREATE TABLE govengers_job_schedules (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 `
+
+// MigrationV2 adds what an attempt reports besides its outcome (J53): the progress of the
+// running attempt, the result of a completed job, the class of the last error and when the
+// last attempt started. Run it in a goose migration after MigrationV1, before the replicas run
+// this version of the module: it only adds nullable columns and NOT VALID checks, so it takes
+// a short ACCESS EXCLUSIVE lock and rewrites nothing, and the replicas of the previous version
+// keep working on the new schema (they never read or write the new columns).
+const MigrationV2 = `
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+ALTER TABLE govengers_jobs
+    ADD COLUMN progress double precision,
+    ADD COLUMN progress_message text,
+    ADD COLUMN result json,
+    ADD COLUMN error_class text,
+    ADD COLUMN started_at timestamptz;
+
+-- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked.
+-- result is json, not jsonb: it keeps the text SetResult encoded as it is and checks only its
+-- syntax, so every accepted result fits, and the bound is jobs.MaximumResultBytes exactly. A
+-- trigger on the table must not convert the row to jsonb (J61).
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress
+    CHECK (progress >= 0 AND progress <= 1) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress_message
+    CHECK (char_length(progress_message) <= 200) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_result
+    CHECK (octet_length(result::text) <= 65536) NOT VALID;
+ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
+    CHECK (error_class IN ('transient', 'permanent', 'lease_expired')) NOT VALID;
+`
+
+// LivewireTriggerSQL makes govengers_jobs notify a govengers/livewire engine of the changes a
+// user interface shows, so a live subscription of a resource that lists the table re-runs
+// (J56). Use it instead of livewire's TriggerSQL("govengers_jobs"), in a goose migration after
+// MigrationV2; it needs no other livewire SQL. An insert, a delete and a TRUNCATE always
+// notify; an update notifies only when a column of View other than UpdatedAt changed, so a
+// lease extension of the heartbeat, which runs every lease/3 for every running job and moves
+// updated_at, notifies nothing.
+// Every claim, finish and progress write still notifies: on a busy queue the subscriptions of
+// the table re-run often (livewire coalesces them per subscription).
+// The trigger function govengers_jobs_livewire_notify() sends the notification of livewire's
+// TriggerFunctionSQL (`{"table", "op", "id", "partition"}` on the channel "livewire") but reads
+// only the row's id: livewire_notify() converts the whole row to jsonb, which refuses results
+// the json column stores and so would fail their finish write and their sweep (J61).
+// The function body holds semicolons inside $$: copied into a goose SQL migration file, the
+// constant goes between -- +goose StatementBegin and -- +goose StatementEnd, else goose splits
+// the body; a Go migration executes the constant as it is.
+const LivewireTriggerSQL = `
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+CREATE OR REPLACE FUNCTION govengers_jobs_livewire_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    row_id text := '';
+BEGIN
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        row_id := NEW.id::text;
+    ELSIF TG_OP = 'DELETE' THEN
+        row_id := OLD.id::text;
+    END IF;
+    PERFORM pg_notify('livewire', json_build_object('table', TG_TABLE_NAME,
+        'op', CASE WHEN TG_OP = 'TRUNCATE' THEN 'delete' ELSE lower(TG_OP) END,
+        'id', row_id, 'partition', '')::text);
+    RETURN NULL;
+END
+$$;
+
+CREATE OR REPLACE TRIGGER livewire_notify AFTER INSERT OR DELETE ON govengers_jobs
+    FOR EACH ROW EXECUTE FUNCTION govengers_jobs_livewire_notify();
+CREATE OR REPLACE TRIGGER livewire_notify_update AFTER UPDATE ON govengers_jobs
+    FOR EACH ROW WHEN (
+        OLD.status IS DISTINCT FROM NEW.status
+        OR OLD.attempt IS DISTINCT FROM NEW.attempt
+        OR OLD.run_at IS DISTINCT FROM NEW.run_at
+        OR OLD.cancel_requested IS DISTINCT FROM NEW.cancel_requested
+        OR OLD.last_error IS DISTINCT FROM NEW.last_error
+        OR OLD.error_class IS DISTINCT FROM NEW.error_class
+        OR OLD.progress IS DISTINCT FROM NEW.progress
+        OR OLD.progress_message IS DISTINCT FROM NEW.progress_message
+        OR OLD.result::text IS DISTINCT FROM NEW.result::text -- json has no equality
+        OR OLD.started_at IS DISTINCT FROM NEW.started_at
+        OR OLD.finished_at IS DISTINCT FROM NEW.finished_at
+    )
+    EXECUTE FUNCTION govengers_jobs_livewire_notify();
+CREATE OR REPLACE TRIGGER livewire_notify_truncate AFTER TRUNCATE ON govengers_jobs
+    FOR EACH STATEMENT EXECUTE FUNCTION govengers_jobs_livewire_notify();
+`

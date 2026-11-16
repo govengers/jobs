@@ -34,12 +34,18 @@ func (c *MailJobController) Register(worker *jobs.Worker) error {
 	return jobs.Handle(worker, model.WelcomeMailKind, c.sendWelcomeMail)
 }
 
-// sendWelcomeMail sends the mail; a user that no longer exists will not come back, so its job
-// is dead at once instead of retried.
+// sendWelcomeMail sends the mail and leaves whether it did as the job's result; a user that no
+// longer exists will not come back, so its job is dead at once instead of retried.
 func (c *MailJobController) sendWelcomeMail(ctx context.Context, job *jobs.Job[model.WelcomeMailPayload]) error {
-	err := c.service.SendWelcomeMail(ctx, job.Payload.UserID)
+	result, err := c.service.SendWelcomeMail(ctx, job.Payload.UserID)
 	if errors.Is(err, model.ErrNotFound) {
 		return jobs.Permanent(err)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// The mail went out: a result that cannot be kept is not worth a retry, which would send it
+	// again (SetResult's errors are deterministic).
+	_ = jobs.SetResult(ctx, result)
+	return nil
 }

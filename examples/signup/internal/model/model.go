@@ -48,6 +48,12 @@ type WelcomeMailPayload struct {
 	UserID uuid.UUID `json:"userId"`
 }
 
+// WelcomeMailResult is what a welcome mail job leaves for the admin reads (jobs.SetResult):
+// whether this run sent the mail, or found it sent by an earlier run.
+type WelcomeMailResult struct {
+	Sent bool `json:"sent"`
+}
+
 // WelcomeMailKind is the contract between the repository that enqueues the welcome mail and
 // the job controller that sends it.
 var WelcomeMailKind = jobs.NewKind[WelcomeMailPayload]("signup.welcome_mail", &jobs.KindOptions{Queue: "mail", MaximumAttempts: 8})

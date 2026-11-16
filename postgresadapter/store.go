@@ -46,8 +46,9 @@ func New(options *Options) (*Store, error) {
 	return &Store{pool: options.Pool, propagators: append([]jobs.Propagator(nil), options.Propagators...)}, nil
 }
 
-// Executor runs Enqueue's statements: a pgx.Tx, a *pgxpool.Pool or a *pgx.Conn. It is the one
-// method Enqueue needs, so any wrapper of those types satisfies it.
+// Executor runs the statements of Enqueue, CancelOn and RetryOn: a pgx.Tx, a *pgxpool.Pool, a
+// *pgx.Conn or the handle of a govengers/livewire unit of work. It is the one method they need,
+// so any wrapper of those types satisfies it.
 type Executor interface {
 	QueryRow(ctx context.Context, statement string, arguments ...any) pgx.Row
 }

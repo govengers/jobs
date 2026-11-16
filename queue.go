@@ -161,9 +161,17 @@ func (r *queueRunner) attempt(ctx context.Context, claim *Claim) error {
 	registered := r.handlerFor(claim.Kind)
 	started := time.Now()
 	attemptContext, reports := withResultReports(ctx)
+	attemptContext, output := withAttemptOutput(attemptContext, r.progressWriter(ctx, claim.Lease), r.options.ProgressInterval)
 	handlerError := r.invoke(attemptContext, registered.handler, claim)
 	duration := time.Since(started)
+	progress, handlerResult := output.close()
 	finish, decided := decideRecovering(claim, handlerError, context.Cause(ctx), registered.backoff)
+	if finish != nil {
+		finish.Progress = progress
+		if finish.Status == StatusCompleted {
+			finish.Result = handlerResult
+		}
+	}
 	result, writeError := r.writeFinish(ctx, finish, decided)
 	r.forget(claim)
 	reports.report(result, writeError)
@@ -202,6 +210,34 @@ func (r *queueRunner) writeFinish(ctx context.Context, finish *Finish, decided R
 		Name: OperationFinish, Queue: r.queue, Count: written, Duration: time.Since(started), Err: err,
 	})
 	return storedResult(decided, stored, err), err
+}
+
+// progressWriter writes the attempt's progress reports in the background (J54). A failed or
+// fenced write only reaches the Observer: progress is information, the attempt goes on. A
+// panic of the store is a failed write, since it runs on a goroutine of a timer.
+func (r *queueRunner) progressWriter(ctx context.Context, lease Lease) progressWriter {
+	return func(progress Progress) {
+		operationContext, cancel := detached(ctx)
+		defer cancel()
+		started := time.Now()
+		written, err := r.writeProgress(operationContext, lease, progress)
+		count := 0
+		if written {
+			count = 1
+		}
+		r.observer.operationFinished(&Operation{
+			Name: OperationProgress, Queue: r.queue, Count: count, Duration: time.Since(started), Err: err,
+		})
+	}
+}
+
+func (r *queueRunner) writeProgress(ctx context.Context, lease Lease, progress Progress) (written bool, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			written, err = false, recovery.Error("writing the progress of job "+lease.JobID.String(), recovered)
+		}
+	}()
+	return r.store.WriteProgress(ctx, lease, progress)
 }
 
 // forget ends the heartbeat of this attempt, and only of this attempt.

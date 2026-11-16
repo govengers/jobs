@@ -1,11 +1,12 @@
 # govengers/jobs
 
-> Durable PostgreSQL work queue for govengers services: typed kinds, enqueue inside the caller's transaction, lease plus heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain and release, adapters for wide events, auth identity, Prometheus and OpenTelemetry tracing.
+> Durable PostgreSQL work queue for govengers services: typed kinds, enqueue inside the caller's transaction, lease plus heartbeat with lease-token fencing, retry with backoff, Permanent and Snooze outcomes, leaderless rescuer, retention and schedules, graceful drain and release, progress reports and results, a stable job view for user interfaces, adapters for wide events, auth identity, Prometheus, OpenTelemetry tracing and a live govengers/livewire jobs resource.
 
 - Module: `github.com/govengers/jobs`, Go 1.26, PostgreSQL 18, Apache 2.0.
-- Packages: `jobs` (model, outcomes, worker, Store/Observer/Propagator interfaces), `postgresadapter` (Store on pgx/v5, Enqueue, admin operations, QueueDepths, MigrationV1), `wideeventadapter`, `authadapter`, `prometheusadapter`, `oteladapter` (trace context propagator, span per attempt), `jobstest` (Drain).
+- Packages: `jobs` (model, outcomes, worker, ReportProgress, SetResult, ErrorClass, Store/Observer/Propagator interfaces), `postgresadapter` (Store on pgx/v5, Enqueue, admin operations incl. CancelOn/RetryOn/ViewsOn, View and State, QueueDepths, MigrationV1, MigrationV2, LivewireTriggerSQL), `livewireadapter` (Declarations: the live `jobs` resource, `cancelJob`, `retryJob`), `wideeventadapter`, `authadapter`, `prometheusadapter`, `oteladapter` (trace context propagator, span per attempt), `jobstest` (Drain).
 - Standards: govengers/standards, `library` profile.
 - Rule of thumb: jobs stay inside one service and its database; delivery is at least once, so handlers are idempotent; a handler is a job controller that calls a service method.
+- Progress: `jobs.ReportProgress(ctx, jobs.Progress{Fraction, Message})` never blocks and is a no-op outside an attempt; `jobs.SetResult(ctx, v)` keeps at most 64 KiB of JSON on success; its errors are deterministic, so wrap them with `jobs.Permanent` or drop them, never return them bare. Run `MigrationV2` before deploying. With livewire use `postgresadapter.LivewireTriggerSQL`, never livewire's `TriggerSQL("govengers_jobs")` (it notifies every heartbeat, and livewire's trigger function converts the row to jsonb, which refuses results the store accepts).
 
 ## Docs
 
@@ -15,6 +16,7 @@
 - [docs/wiki/Worker.md](docs/wiki/Worker.md): queues, outcomes, leases, heartbeat, fencing, shutdown, rescuer, retention, split deployments.
 - [docs/wiki/Schedules.md](docs/wiki/Schedules.md): recurring jobs once per period.
 - [docs/wiki/Postgres-Store.md](docs/wiki/Postgres-Store.md): schema, migration, admin operations.
+- [docs/wiki/Progress-and-Results.md](docs/wiki/Progress-and-Results.md): progress reports, results, error classes, the job view, the livewire resource.
 - [docs/wiki/Observability.md](docs/wiki/Observability.md): wide events, metrics (aggregate depth with max), identity, Observer.
 - [docs/wiki/Testing.md](docs/wiki/Testing.md): jobstest.Drain, embedded Postgres, the end-to-end suite.
 - [docs/wiki/Migration.md](docs/wiki/Migration.md): replacing a hand-rolled Postgres queue.
