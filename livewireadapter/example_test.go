@@ -34,7 +34,7 @@ func ownJobs(ctx context.Context) (query.Predicate, error) {
 }
 
 // The jobs of a livewire application: every user reads the jobs it started, operators read,
-// cancel and retry every job. The migrations run livewire's TriggerFunctionSQL, then
+// cancel and retry every job. The migrations run
 // postgresadapter.LivewireTriggerSQL, so the subscriptions go live.
 func ExampleDeclarations() {
 	var (

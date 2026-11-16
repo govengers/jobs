@@ -71,8 +71,9 @@ ALTER TABLE govengers_jobs
     ADD COLUMN started_at timestamptz;
 
 -- every row has NULL in the new columns, so NOT VALID skips nothing; new writes are checked.
--- result is json, not jsonb: it keeps the text SetResult accepted byte for byte and checks only
--- its syntax, so every accepted result fits, and the bound is jobs.MaximumResultBytes exactly.
+-- result is json, not jsonb: it keeps the text SetResult encoded as it is and checks only its
+-- syntax, so every accepted result fits, and the bound is jobs.MaximumResultBytes exactly. A
+-- trigger on the table must not convert the row to jsonb (J61).
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress
     CHECK (progress >= 0 AND progress <= 1) NOT VALID;
 ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_progress_message
@@ -85,19 +86,39 @@ ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
 
 // LivewireTriggerSQL makes govengers_jobs notify a govengers/livewire engine of the changes a
 // user interface shows, so a live subscription of a resource that lists the table re-runs
-// (J56). Use it instead of livewire's TriggerSQL("govengers_jobs"), after livewire's
-// TriggerFunctionSQL, in a goose migration after MigrationV2. An insert, a delete and a
-// TRUNCATE always notify; an update notifies only when a column of View other than UpdatedAt
-// changed, so a lease extension of the heartbeat, which runs every lease/3 for every running
-// job and moves updated_at, notifies nothing.
+// (J56). Use it instead of livewire's TriggerSQL("govengers_jobs"), in a goose migration after
+// MigrationV2; it needs no other livewire SQL. An insert, a delete and a TRUNCATE always
+// notify; an update notifies only when a column of View other than UpdatedAt changed, so a
+// lease extension of the heartbeat, which runs every lease/3 for every running job and moves
+// updated_at, notifies nothing.
 // Every claim, finish and progress write still notifies: on a busy queue the subscriptions of
 // the table re-run often (livewire coalesces them per subscription).
+// The trigger function govengers_jobs_livewire_notify() sends the notification of livewire's
+// TriggerFunctionSQL (`{"table", "op", "id", "partition"}` on the channel "livewire") but reads
+// only the row's id: livewire_notify() converts the whole row to jsonb, which refuses results
+// the json column stores and so would fail their finish write and their sweep (J61).
 const LivewireTriggerSQL = `
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
+CREATE OR REPLACE FUNCTION govengers_jobs_livewire_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    row_id text := '';
+BEGIN
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        row_id := NEW.id::text;
+    ELSIF TG_OP = 'DELETE' THEN
+        row_id := OLD.id::text;
+    END IF;
+    PERFORM pg_notify('livewire', json_build_object('table', TG_TABLE_NAME,
+        'op', CASE WHEN TG_OP = 'TRUNCATE' THEN 'delete' ELSE lower(TG_OP) END,
+        'id', row_id, 'partition', '')::text);
+    RETURN NULL;
+END
+$$;
+
 CREATE OR REPLACE TRIGGER livewire_notify AFTER INSERT OR DELETE ON govengers_jobs
-    FOR EACH ROW EXECUTE FUNCTION livewire_notify();
+    FOR EACH ROW EXECUTE FUNCTION govengers_jobs_livewire_notify();
 CREATE OR REPLACE TRIGGER livewire_notify_update AFTER UPDATE ON govengers_jobs
     FOR EACH ROW WHEN (
         OLD.status IS DISTINCT FROM NEW.status
@@ -112,7 +133,7 @@ CREATE OR REPLACE TRIGGER livewire_notify_update AFTER UPDATE ON govengers_jobs
         OR OLD.started_at IS DISTINCT FROM NEW.started_at
         OR OLD.finished_at IS DISTINCT FROM NEW.finished_at
     )
-    EXECUTE FUNCTION livewire_notify();
+    EXECUTE FUNCTION govengers_jobs_livewire_notify();
 CREATE OR REPLACE TRIGGER livewire_notify_truncate AFTER TRUNCATE ON govengers_jobs
-    FOR EACH STATEMENT EXECUTE FUNCTION livewire_notify();
+    FOR EACH STATEMENT EXECUTE FUNCTION govengers_jobs_livewire_notify();
 `

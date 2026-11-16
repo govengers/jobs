@@ -14,24 +14,24 @@ import (
 	"github.com/govengers/jobs/postgresadapter"
 )
 
-// change is one notification of livewire's trigger function.
+// change is one notification in the shape of livewire's TriggerFunctionSQL.
 type change struct {
-	Table string `json:"table"`
-	Op    string `json:"op"`
-	ID    string `json:"id"`
+	Table     string `json:"table"`
+	Op        string `json:"op"`
+	ID        string `json:"id"`
+	Partition string `json:"partition"`
 }
 
-// TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat pins LivewireTriggerSQL (J56): the
-// changes of a job's life notify, a lease extension does not. Other tests of the binary share
+// TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat pins LivewireTriggerSQL (J56, J61): the
+// changes of a job's life notify in the shape of livewire's trigger function, without that
+// function installed, a lease extension does not. Other tests of the binary share
 // the database and its channel, so the notifications are taken by the job's id until a
 // sentinel of this test arrives, which commits after every write below.
 func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 	fixture := newOperatorFixture(t)
 	ctx := context.Background()
-	for _, migration := range []string{livewirepostgres.TriggerFunctionSQL, postgresadapter.LivewireTriggerSQL} {
-		_, err := fixture.pool.Exec(ctx, migration)
-		require.NoError(t, err)
-	}
+	_, err := fixture.pool.Exec(ctx, postgresadapter.LivewireTriggerSQL)
+	require.NoError(t, err)
 	listener, err := fixture.pool.Acquire(ctx)
 	require.NoError(t, err)
 	defer listener.Release()
@@ -50,6 +50,11 @@ func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 	require.True(t, written)
 	_, err = fixture.store.Finish(ctx, &jobs.Finish{Lease: lease, Status: jobs.StatusCompleted})
 	require.NoError(t, err)
+	deleted, err := fixture.store.Sweep(ctx, &jobs.SweepRequest{Limit: 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted)
+	_, err = fixture.pool.Exec(ctx, "TRUNCATE govengers_jobs")
+	require.NoError(t, err)
 	sentinel := uuid.NewString()
 	_, err = fixture.pool.Exec(ctx, "SELECT pg_notify($1, $2)", livewirepostgres.Channel, sentinel)
 	require.NoError(t, err)
@@ -64,10 +69,12 @@ func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 			break
 		}
 		var received change
-		if json.Unmarshal([]byte(notification.Payload), &received) == nil && received.ID == id.String() {
+		if json.Unmarshal([]byte(notification.Payload), &received) == nil && (received.ID == id.String() || received.ID == "") {
 			require.Equal(t, "govengers_jobs", received.Table)
-			operations = append(operations, received.Op)
+			require.Empty(t, received.Partition)
+			operations = append(operations, received.Op+" "+received.ID)
 		}
 	}
-	require.Equal(t, []string{"insert", "update", "update", "update"}, operations, "enqueue, claim, progress and finish; the heartbeat is silent")
+	require.Equal(t, []string{"insert " + id.String(), "update " + id.String(), "update " + id.String(), "update " + id.String(), "delete " + id.String(), "delete "},
+		operations, "enqueue, claim, progress, finish, sweep and TRUNCATE; the heartbeat is silent")
 }

@@ -166,15 +166,19 @@ func TestTextPostgreSQLRefusesDoesNotFailTheFinishWrite(t *testing.T) {
 	require.Equal(t, "bad name �", record.LastError)
 }
 
-// J60: every result SetResult accepts, the finish write stores byte for byte, also what jsonb
+// J60, J61: every result SetResult accepts, the finish write stores as encoded, also what jsonb
 // refuses: a relayed body with a lone surrogate escape (JavaScript cutting a string inside an
-// emoji), the escape \u0000, a number beyond numeric, and a result exactly at the cap.
+// emoji), the escape \u0000, a number beyond numeric, and a result exactly at the cap. The
+// live trigger is installed, so its notification must not convert the row to jsonb, neither on
+// the finish nor on the sweep that deletes the jobs.
 func TestEveryResultSetResultAcceptsIsStored(t *testing.T) {
 	type relayed struct {
 		Status int             `json:"status"`
 		Body   json.RawMessage `json:"body"`
 	}
 	harness := newHarness(t)
+	_, err := harness.pool.Exec(context.Background(), postgresadapter.LivewireTriggerSQL)
+	require.NoError(t, err)
 	worker := harness.worker(nil)
 	results := map[string]any{
 		"surrogate": relayed{Status: 200, Body: json.RawMessage(`{"title":"Launch party \ud83c"}`)},
@@ -191,7 +195,7 @@ func TestEveryResultSetResultAcceptsIsStored(t *testing.T) {
 		ids[name] = harness.enqueue(context.Background(), kind.New(mailPayload{Recipient: name}, nil))
 	}
 
-	_, err := worker.RunDue(context.Background())
+	_, err = worker.RunDue(context.Background())
 
 	require.NoError(t, err)
 	for name, id := range ids {
@@ -201,4 +205,7 @@ func TestEveryResultSetResultAcceptsIsStored(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, string(encoded), string(record.Result), name)
 	}
+	deleted, err := harness.store.Sweep(context.Background(), &jobs.SweepRequest{Limit: len(ids)})
+	require.NoError(t, err)
+	require.Equal(t, len(ids), deleted)
 }
