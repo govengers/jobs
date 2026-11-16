@@ -109,19 +109,21 @@ Rejected: a shared "bus" database all services connect to (couples every service
 
 ## 3. Decisions: events
 
+E1-E11 were agreed here; the events library now exists and its [docs/design.md of github.com/govengers/events](https://github.com/govengers/events/blob/main/docs/design.md) is their source of truth, with E12 onwards decided while building it. A refinement there wins over the text below.
+
 | ID | Decision |
 |----|----------|
 | E1 | Module `github.com/govengers/events`, depends on `govengers/jobs`. A separate module, so the younger events API can change without forcing a jobs major (LIB-001). Built after jobs v1. |
 | E2 | Typed contract `events.NewTopic[P]("orders.order-placed.v1")` in a contract package of the publisher that depends on nothing beyond the standard library and uuid; subscribers import it. The major version is part of the name; within a version only additive changes; a breaking change publishes v1 and v2 side by side until every subscriber moved. |
 | E3 | Envelope: CloudEvents 1.0, structured JSON mode: `id` (uuidv7), `source` (publisher service), `type` (topic), `time`, `data`, extensions `traceparent` and `actor`. A known standard instead of an own format: readable by any tool, ready for a broker later. |
-| E4 | Publish on the caller's transaction: `publisher.Publish(ctx, transaction, OrderPlacedTopic.New(payload))` reads the topic's subscriptions and enqueues one job per subscription in that transaction. Local subscription: a job on queue `events.<subscription>`. Remote subscription: a `govengers.events.deliver` job on queue `govengers.events.outbound`. A topic without subscriptions stores nothing. No event log table in v1. A publisher runs a worker that consumes `govengers.events.outbound`. |
+| E4 | Publish on the caller's transaction: `publisher.Publish(ctx, transaction, OrderPlacedTopic.New(payload))` reads the topic's subscriptions and enqueues one job per subscription in that transaction. Local subscription: a job on queue `events.<subscription>`. Remote subscription: a `govengers.events.deliver` job on queue `govengers.events.outbound`. A topic without subscriptions stores nothing. No event log table in v1. A publisher runs a worker that consumes `govengers.events.outbound`. Refined in govengers/events: queues by E13, the delivery ledger by E15 (its `docs/design.md`). |
 | E5 | Subscriptions live in the publisher's database: `govengers_event_subscriptions(subscriber, name, topic, delivery, endpoint, secret)`. A subscriber declares its complete set per publisher and the publisher replaces that subscriber's rows in one transaction, so a removed handler stops receiving and nothing goes stale. Local: the subscriber writes its set at startup (same database). Remote: the subscriber sends it with `PUT {publisher}/events/subscribers/{subscriber}` from a job in its own queue, retried until the publisher answers, so the subscriber starts even while the publisher is down. Events published before a subscription exists are not delivered. |
 | E6 | Outbound delivery (publisher's worker): loads the subscription at send time (deleted: complete and drop) and POSTs `application/cloudevents+json`, signed per Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature`, HMAC-SHA256). 2xx completes. 404 (subscriber mid-rollout), 408, 429 (honoring `Retry-After`), 5xx and transport errors retry with backoff; other 4xx are dead. Defaults: 30 attempts, backoff capped at 1 h, about one day. |
 | E7 | Inbox (subscriber): `POST /events/{subscription}` verifies the signature and that the event type is the subscription's topic, then in one transaction inserts `(subscription, event id)` into `govengers_event_inbox` and, only when that row is new, enqueues the handler's job. Answers 202 for new and duplicate deliveries alike. Inbox rows expire after 7 d, longer than E6's delivery window. The handler is a jobs handler: retries, wide events and metrics come from jobs. |
 | E8 | Secrets: a subscription's signing secret is HMAC(subscriber's `EVENTS_INBOX_KEY`, subscription name). The subscriber sends it at registration and stores nothing; the publisher stores it. Rotating the key re-registers. The registration request authenticates with the subscriber's API key at the publisher (govengers/auth `apikey`); an authorization check in the publisher's options decides which topics a subscriber may read. |
 | E9 | Identity across services: the `actor` extension (`provider:subject`, user ID) is audit information only. A subscriber's job runs as the subscriber's system identity; an identity issued by another service is never treated as authenticated. Inside one service (jobs, local subscriptions) J15 carries the real identity. |
 | E10 | Delivery is at-least-once and unordered. Payloads carry the aggregate's version or update time, so a subscriber can drop a stale update (Hub PR #322: `SKIP LOCKED` never orders). |
-| E11 | Packages: `events` (topics, envelope, signing, publisher and subscriber, outbound, inbox and registration handlers on `net/http`), `events/postgresadapter` (Publish, subscription and inbox stores, DDL), `events/ginadapter` (routes). |
+| E11 | Packages: `events` (topics, envelope, signing, publisher and subscriber, outbound, inbox and registration handlers on `net/http`), `events/postgresadapter` (Publish, subscription and inbox stores, DDL), `events/ginadapter` (routes). As built, see govengers/events `docs/design.md`: `ginadapter` dropped by E21. |
 
 ## 4. Packages (jobs)
 
@@ -289,6 +291,8 @@ err = events.Subscribe(subscriber, ordersPublisher, ordercontract.OrderPlacedTop
 | WP7 | events: core, `postgresadapter`, local subscriptions | embedded-postgres tests |
 | WP8 | events: outbound, inbox, registration, signing, `ginadapter` | e2e: two services, two databases, subscriber down and back |
 | WP9 | events v1.0.0, standards rules for events | dual review |
+
+WP7-WP9 are built in the govengers/events repo: its [docs/design.md](https://github.com/govengers/events/blob/main/docs/design.md) holds what was delivered (v0, E12 onwards; `ginadapter` dropped by E21).
 
 ## 9. Open questions
 
