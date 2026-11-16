@@ -97,6 +97,9 @@ ALTER TABLE govengers_jobs ADD CONSTRAINT govengers_jobs_error_class
 // TriggerFunctionSQL (`{"table", "op", "id", "partition"}` on the channel "livewire") but reads
 // only the row's id: livewire_notify() converts the whole row to jsonb, which refuses results
 // the json column stores and so would fail their finish write and their sweep (J61).
+// The function body holds semicolons inside $$: copied into a goose SQL migration file, the
+// constant goes between -- +goose StatementBegin and -- +goose StatementEnd, else goose splits
+// the body; a Go migration executes the constant as it is.
 const LivewireTriggerSQL = `
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
