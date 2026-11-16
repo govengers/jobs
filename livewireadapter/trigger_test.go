@@ -2,11 +2,12 @@ package livewireadapter_test
 
 import (
 	"context"
-	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/govengers/livewire"
 	livewirepostgres "github.com/govengers/livewire/postgresadapter"
 	"github.com/stretchr/testify/require"
 
@@ -14,29 +15,47 @@ import (
 	"github.com/govengers/jobs/postgresadapter"
 )
 
-// change is one notification in the shape of livewire's TriggerFunctionSQL.
-type change struct {
-	Table     string `json:"table"`
-	Op        string `json:"op"`
-	ID        string `json:"id"`
-	Partition string `json:"partition"`
-}
-
 // TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat pins LivewireTriggerSQL (J56, J61): the
 // changes of a job's life notify in the shape of livewire's trigger function, without that
-// function installed, a lease extension does not. Other tests of the binary share
-// the database and its channel, so the notifications are taken by the job's id until a
-// sentinel of this test arrives, which commits after every write below.
+// function installed, a lease extension does not. The notifications are received through
+// livewire's own Listener, whose strict decode drops a payload of another shape and reports
+// it to OnError, so a drift between the two modules fails here. Other tests of the binary
+// share the database and its channel, so the changes are taken by the job's id until a
+// sentinel change of this test arrives, which commits after every write below.
 func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 	fixture := newOperatorFixture(t)
 	ctx := context.Background()
 	_, err := fixture.pool.Exec(ctx, postgresadapter.LivewireTriggerSQL)
 	require.NoError(t, err)
-	listener, err := fixture.pool.Acquire(ctx)
+	var mutex sync.Mutex
+	var failures []error
+	listener, err := livewirepostgres.NewListener(&livewirepostgres.ListenerOptions{
+		DSN: fixture.pool.Config().ConnString(),
+		OnError: func(err error) {
+			mutex.Lock()
+			defer mutex.Unlock()
+			failures = append(failures, err)
+		},
+	})
 	require.NoError(t, err)
-	defer listener.Release()
-	_, err = listener.Exec(ctx, "LISTEN "+livewirepostgres.Channel)
-	require.NoError(t, err)
+	listening, stop := context.WithTimeout(ctx, 10*time.Second)
+	defer stop()
+	changes := make(chan livewire.Change, 64)
+	resynced := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- listener.Run(listening, func(change livewire.Change) { changes <- change }, func() {
+			select {
+			case resynced <- struct{}{}:
+			default:
+			}
+		})
+	}()
+	select {
+	case <-resynced:
+	case <-listening.Done():
+		t.Fatal("the listener did not LISTEN")
+	}
 
 	id := fixture.enqueue(mailKind.New(mailPayload{}, nil))
 	claims, err := fixture.store.Claim(ctx, &jobs.ClaimRequest{Queue: "mail", Limit: 1, LeaseDuration: time.Minute, Worker: "test"})
@@ -56,25 +75,29 @@ func TestTheTriggerNotifiesWhatAViewShowsButNoHeartbeat(t *testing.T) {
 	_, err = fixture.pool.Exec(ctx, "TRUNCATE govengers_jobs")
 	require.NoError(t, err)
 	sentinel := uuid.NewString()
-	_, err = fixture.pool.Exec(ctx, "SELECT pg_notify($1, $2)", livewirepostgres.Channel, sentinel)
+	_, err = fixture.pool.Exec(ctx, "SELECT pg_notify($1, json_build_object('table', 'sentinel', 'op', 'insert', 'id', $2::text, 'partition', '')::text)",
+		livewirepostgres.Channel, sentinel)
 	require.NoError(t, err)
 
 	var operations []string
-	waiting, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	for {
-		notification, err := listener.Conn().WaitForNotification(waiting)
-		require.NoError(t, err)
-		if notification.Payload == sentinel {
-			break
-		}
-		var received change
-		if json.Unmarshal([]byte(notification.Payload), &received) == nil && (received.ID == id.String() || received.ID == "") {
-			require.Equal(t, "govengers_jobs", received.Table)
-			require.Empty(t, received.Partition)
-			operations = append(operations, received.Op+" "+received.ID)
+	for received := false; !received; {
+		select {
+		case change := <-changes:
+			switch {
+			case change.Table == "sentinel" && change.ID == sentinel:
+				received = true
+			case change.ID == id.String() || change.ID == "":
+				require.Equal(t, "govengers_jobs", change.Table)
+				require.Empty(t, change.Partition)
+				operations = append(operations, string(change.Operation)+" "+change.ID)
+			}
+		case <-listening.Done():
+			t.Fatal("the sentinel change did not arrive")
 		}
 	}
+	stop()
+	require.ErrorIs(t, <-done, context.Canceled)
+	require.Empty(t, failures, "livewire's Listener dropped or failed nothing")
 	require.Equal(t, []string{"insert " + id.String(), "update " + id.String(), "update " + id.String(), "update " + id.String(), "delete " + id.String(), "delete "},
 		operations, "enqueue, claim, progress, finish, sweep and TRUNCATE; the heartbeat is silent")
 }
